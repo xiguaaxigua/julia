@@ -562,6 +562,7 @@ JL_DLLEXPORT jl_value_t *jl_toplevel_eval_in(jl_module_t *m, jl_value_t *ex)
         jl_error("eval cannot be used in a generated function");
     jl_value_t *v = NULL;
     int last_lineno = jl_lineno;
+    size_t last_age = ptls->world_age;
     jl_module_t *last_m = ptls->current_module;
     jl_module_t *task_last_m = ptls->current_task->current_module;
     if (jl_options.incremental && jl_generating_output()) {
@@ -574,15 +575,18 @@ JL_DLLEXPORT jl_value_t *jl_toplevel_eval_in(jl_module_t *m, jl_value_t *ex)
     }
     JL_TRY {
         ptls->current_task->current_module = ptls->current_module = m;
+        ptls->world_age = jl_world_counter;
         v = jl_toplevel_eval(ex);
     }
     JL_CATCH {
         jl_lineno = last_lineno;
+        ptls->world_age = last_age;
         ptls->current_module = last_m;
         ptls->current_task->current_module = task_last_m;
         jl_rethrow();
     }
     jl_lineno = last_lineno;
+    ptls->world_age = last_age;
     ptls->current_module = last_m;
     ptls->current_task->current_module = task_last_m;
     assert(v);
