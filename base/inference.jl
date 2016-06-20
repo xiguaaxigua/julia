@@ -50,6 +50,7 @@ type InferenceState
     # info on the state of inference and the linfo
     linfo::MethodInstance # used here for the tuple (specTypes, env, Method)
     src::CodeInfo
+    world::UInt
     nargs::Int
     stmt_types::Vector{Any}
     # return type
@@ -79,7 +80,7 @@ type InferenceState
     inferred::Bool
 
     # src is assumed to be a newly-allocated CodeInfo, that can be modified in-place to contain intermediate results
-    function InferenceState(linfo::MethodInstance, src::CodeInfo, optimize::Bool, inlining::Bool, cached::Bool)
+    function InferenceState(linfo::MethodInstance, src::CodeInfo, world::UInt, optimize::Bool, inlining::Bool, cached::Bool)
         code = src.code::Array{Any,1}
         nl = label_counter(code) + 1
         toplevel = !isdefined(linfo, :def)
@@ -158,7 +159,7 @@ type InferenceState
         inmodule = toplevel ? current_module() : linfo.def.module # toplevel thunks are inferred in the current module
         frame = new(
             sp, nl, inmodule, 0,
-            linfo, src, nargs, s, Union{}, W, n,
+            linfo, src, world, nargs, s, Union{}, W, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), #Dict{InferenceState, Vector{LineNum}}(),
@@ -657,7 +658,7 @@ function invoke_tfunc(f::ANY, types::ANY, argtype::ANY, sv::InferenceState)
     ft = type_typeof(f)
     types = Tuple{ft, types.parameters...}
     argtype = Tuple{ft, argtype.parameters...}
-    entry = ccall(:jl_gf_invoke_lookup, Any, (Any,), types)
+    entry = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), types, sv.world)
     if is(entry, nothing)
         return Any
     end
@@ -916,7 +917,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
         end
         rt = typeinf_edge(method, sig, sparams, sv)
         rettype = tmerge(rettype, rt)
-        if is(rettype,Any)
+        if is(rettype, Any)
             break
         end
     end
@@ -1473,7 +1474,13 @@ end
 inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
-function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, preexisting::Bool=false)
+#### entry points for inferring a MethodInstance given a type signature ####
+let _min_age = Symbol("min-age"), _max_age = Symbol("max-age")
+    global min_age(m::Method) = getfield(m, _min_age) % UInt
+    global max_age(m::Method) = getfield(m, _max_age) % UInt
+end
+
+function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, preexisting::Bool=false)
     if method.isstaged && !isleaftype(atypes)
         # don't call staged functions on abstract types.
         # (see issues #8504, #10230)
@@ -1485,16 +1492,15 @@ function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, pre
         if !is(method.specializations, nothing)
             # check cached specializations
             # for an existing result stored there
-            return ccall(:jl_specializations_lookup, Any, (Any, Any), method, atypes)
+            return ccall(:jl_specializations_lookup, Any, (Any, Any, UInt), method, atypes, world)
         end
         return nothing
     end
-    return ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), method, atypes, sparams)
+    return ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any, UInt), method, atypes, sparams, world)
 end
 
-
 # build (and start inferring) the inference frame for the linfo
-function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, caller)
+function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, world::UInt, caller)
     frame = nothing
     if linfo.inInference
         # inference on this signature may be in progress,
@@ -1523,7 +1529,7 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, call
             src = get_source(linfo)
         end
         linfo.inInference = true
-        frame = InferenceState(linfo, src, optimize, inlining_enabled(), cached)
+        frame = InferenceState(linfo, src, world, optimize, inlining_enabled(), cached)
     end
     frame = frame::InferenceState
 
@@ -1548,7 +1554,7 @@ end
 
 # compute (and cache) an inferred AST and return the current best estimate of the result type
 function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller::InferenceState)
-    code = code_for_method(method, atypes, sparams)
+    code = code_for_method(method, atypes, sparams, caller.world)
     code === nothing && return Any
     code = code::MethodInstance
     if isdefined(code, :inferred)
@@ -1560,7 +1566,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
             return code.rettype
         end
     end
-    frame = typeinf_frame(code, true, true, caller)
+    frame = typeinf_frame(code, true, true, caller.world, caller)
     frame === nothing && return Any
     frame = frame::InferenceState
     return widenconst(frame.bestguess)
@@ -1569,12 +1575,12 @@ end
 #### entry points for inferring a MethodInstance given a type signature ####
 
 # compute an inferred AST and return type
-function typeinf_code(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool, cached::Bool)
-    code = code_for_method(method, atypes, sparams)
+function typeinf_code(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, optimize::Bool, cached::Bool)
+    code = code_for_method(method, atypes, sparams, world)
     code === nothing && return (nothing, Any)
-    return typeinf_code(code::MethodInstance, optimize, cached)
+    return typeinf_code(code::MethodInstance, world, optimize, cached)
 end
-function typeinf_code(linfo::MethodInstance, optimize::Bool, cached::Bool)
+function typeinf_code(linfo::MethodInstance, world::UInt, optimize::Bool, cached::Bool)
     for i = 1:2 # test-and-lock-and-test
         if cached && isdefined(linfo, :inferred)
             # see if this code already exists in the cache
@@ -1605,7 +1611,7 @@ function typeinf_code(linfo::MethodInstance, optimize::Bool, cached::Bool)
         end
         i == 1 && ccall(:jl_typeinf_begin, Void, ())
     end
-    frame = typeinf_frame(linfo, optimize, cached, nothing)
+    frame = typeinf_frame(linfo, optimize, cached, world, nothing)
     ccall(:jl_typeinf_end, Void, ())
     frame === nothing && return (nothing, Any)
     frame = frame::InferenceState
@@ -1614,8 +1620,8 @@ function typeinf_code(linfo::MethodInstance, optimize::Bool, cached::Bool)
 end
 
 # compute (and cache) an inferred AST and return the inferred return type
-function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, cached::Bool=true)
-    code = code_for_method(method, atypes, sparams)
+function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, cached::Bool=true)
+    code = code_for_method(method, atypes, sparams, world)
     code === nothing && return nothing
     code = code::MethodInstance
     for i = 1:2 # test-and-lock-and-test
@@ -1631,7 +1637,7 @@ function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, cached
         end
         i == 1 && ccall(:jl_typeinf_begin, Void, ())
     end
-    frame = typeinf_frame(code, cached, cached, nothing)
+    frame = typeinf_frame(code, cached, cached, world, nothing)
     ccall(:jl_typeinf_end, Void, ())
     frame === nothing && return nothing
     frame = frame::InferenceState
@@ -1639,16 +1645,16 @@ function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, cached
     return widenconst(frame.bestguess)
 end
 
-function typeinf_ext(linfo::MethodInstance)
+function typeinf_ext(linfo::MethodInstance, world::UInt)
     if isdefined(linfo, :def)
         # method lambda - infer this specialization via the method cache
-        (code, typ) = typeinf_code(linfo, true, true)
+        (code, typ) = typeinf_code(linfo, world, true, true)
         return code
     else
         # toplevel lambda - infer directly
         linfo.inInference = true
         ccall(:jl_typeinf_begin, Void, ())
-        frame = InferenceState(linfo, linfo.inferred::CodeInfo, true, inlining_enabled(), true)
+        frame = InferenceState(linfo, linfo.inferred::CodeInfo, world, true, inlining_enabled(), true)
         typeinf_loop(frame)
         ccall(:jl_typeinf_end, Void, ())
         @assert frame.inferred # TODO: deal with this better
@@ -2442,7 +2448,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
             function splitunion(atypes::Vector{Any}, i::Int)
                 if i == 0
                     local sig = argtypes_to_type(atypes)
-                    local li = ccall(:jl_get_spec_lambda, Any, (Any,), sig)
+                    local li = ccall(:jl_get_spec_lambda, Any, (Any, UInt), sig, sv.world)
                     li === nothing && return false
                     local stmt = []
                     push!(stmt, Expr(:(=), linfo_var, li))
@@ -2509,7 +2515,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
                 return (ret_var, stmts)
             end
         else
-            local cache_linfo = ccall(:jl_get_spec_lambda, Any, (Any,), atype_unlimited)
+            local cache_linfo = ccall(:jl_get_spec_lambda, Any, (Any, UInt), atype_unlimited, sv.world)
             cache_linfo === nothing && return NF
             e.head = :invoke
             unshift!(e.args, cache_linfo)
@@ -2573,7 +2579,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     end
 
     # see if the method has been previously inferred (and cached)
-    linfo = code_for_method(method, metharg, methsp, true)
+    linfo = code_for_method(method, metharg, methsp, sv.world, true)
     if isa(linfo, MethodInstance) && isdefined(linfo, :inferred)
         src = (linfo::MethodInstance).inferred
     elseif !method.isstaged
@@ -2600,10 +2606,10 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
         frame = nothing
         if force_infer
             if !isa(linfo, MethodInstance)
-                linfo = code_for_method(method, metharg, methsp)
+                linfo = code_for_method(method, metharg, methsp, sv.world)
             end
             if isa(linfo, MethodInstance)
-                frame = typeinf_frame(linfo::MethodInstance, true, true, nothing)
+                frame = typeinf_frame(linfo::MethodInstance, true, true, sv.world, nothing)
             end
         end
         if isa(frame, InferenceState) && frame.inferred
@@ -3910,8 +3916,9 @@ end
 
 function return_type(f::ANY, t::ANY)
     rt = Union{}
+    world = typemax(UInt) # FIXME
     for m in _methods(f, t, -1)
-        ty = typeinf_type(m[3], m[1], m[2])
+        ty = typeinf_type(m[3], m[1], m[2], world)
         ty === nothing && return Any
         rt = tmerge(rt, ty)
         rt === Any && break
@@ -3925,8 +3932,8 @@ end
 # this ensures that typeinf_ext doesn't recurse before it can add the item to the workq
 
 for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10)
-    typeinf_type(m[3], m[1], m[2])
+    typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end
 for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10)
-    typeinf_type(m[3], m[1], m[2])
+    typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end
