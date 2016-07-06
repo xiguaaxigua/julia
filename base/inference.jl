@@ -781,7 +781,7 @@ end
 
 #### recursing into expression ####
 
-function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
+function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
     tm = _topmod(sv)
     # don't consider more than N methods. this trades off between
     # compiler performance and generated code performance.
@@ -792,7 +792,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
     # here I picked 4.
     argtype = limit_tuple_type(argtype)
     argtypes = argtype.parameters
-    applicable = _methods_by_ftype(argtype, 4)
+    applicable = _methods_by_ftype(argtype, 4, sv.world)
     rettype = Bottom
     if is(applicable, false)
         # this means too many methods matched
@@ -995,7 +995,7 @@ function abstract_apply(af::ANY, fargs, aargtypes::Vector{Any}, vtypes::VarTable
     return abstract_call(af, (), Any[type_typeof(af), Vararg{Any}], vtypes, sv)
 end
 
-function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv)
+function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv::InferenceState)
     for a in drop(argtypes,1)
         if !(isa(a,Const) || isconstType(a,false))
             return false
@@ -1021,7 +1021,7 @@ function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv)
         end
     end
 
-    meth = _methods_by_ftype(atype, 1)
+    meth = _methods_by_ftype(atype, 1, sv.world)
     if meth === false || length(meth) != 1
         return false
     end
@@ -1474,13 +1474,17 @@ end
 inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
-#### entry points for inferring a MethodInstance given a type signature ####
-let _min_age = Symbol("min-age"), _max_age = Symbol("max-age")
-    global min_age(m::Method) = getfield(m, _min_age) % UInt
-    global max_age(m::Method) = getfield(m, _max_age) % UInt
+function add_backedge(li::MethodInstance, caller::MethodInstance)
+    isdefined(caller, :def) || return # don't add backedges to toplevel exprs
+    isdefined(li, :backedges) || (li.backedges = []) # lazy-init the backedges array
+    in(caller, li.backedges) || push!(li.backedges, caller) # add a backedge from callee to caller
+    nothing
 end
 
 function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, preexisting::Bool=false)
+    if world < min_age(method) || world > max_age(method)
+        return nothing
+    end
     if method.isstaged && !isleaftype(atypes)
         # don't call staged functions on abstract types.
         # (see issues #8504, #10230)
@@ -1533,7 +1537,7 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, worl
     end
     frame = frame::InferenceState
 
-    if isa(caller, InferenceState) && !caller.inferred
+    if isa(caller, InferenceState)
         # if we were called from inside inference, the caller will be the InferenceState object
         # for which the edge was required
         if haskey(caller.edges, frame)
@@ -1557,6 +1561,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
     code = code_for_method(method, atypes, sparams, caller.world)
     code === nothing && return Any
     code = code::MethodInstance
+    add_backedge(code, caller.linfo)
     if isdefined(code, :inferred)
         # return rettype if the code is already inferred
         # staged functions make this hard since they have two "inferred" conditions,
@@ -2011,6 +2016,16 @@ function finish(me::InferenceState)
             end
         end
         ccall(:jl_set_lambda_rettype, Void, (Any, Any, Any, Any), me.linfo, widenconst(me.bestguess), const_api, inferred)
+    end
+
+    if isdefined(me.linfo, :backedges)
+        min_valid = min_age(me.linfo.def)
+        max_valid = max_age(me.linfo.def)
+        for li in me.linfo.backedges
+            li = li::MethodInstance
+            min_valid = max(min_valid, min_age(li.def))
+            max_valid = min(max_valid, max_age(li.def))
+        end
     end
 
     me.src.inferred = true
@@ -2532,7 +2547,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     else
         atype = atype_unlimited
     end
-    meth = _methods_by_ftype(atype, 1)
+    meth = _methods_by_ftype(atype, 1, sv.world)
     if meth === false || length(meth) != 1
         return invoke_NF()
     end
@@ -2626,12 +2641,14 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
 
     if isa(linfo, MethodInstance) && linfo.jlcall_api == 2
         # in this case function can be inlined to a constant
+        add_backedge(linfo::MethodInstance, sv.linfo)
         return inline_as_constant(linfo.inferred, argexprs, sv)
     end
 
     if !isa(src, CodeInfo) || !src.inferred || !src.inlineable
         return invoke_NF()
     end
+    add_backedge(linfo::MethodInstance, sv.linfo)
     ast = src.code
     rettype = linfo.rettype
 
@@ -3915,9 +3932,9 @@ function reindex_labels!(sv::InferenceState)
 end
 
 function return_type(f::ANY, t::ANY)
+    world = ccall(:jl_get_tls_world_age, UInt, ())
     rt = Union{}
-    world = typemax(UInt) # FIXME
-    for m in _methods(f, t, -1)
+    for m in _methods(f, t, -1, world)
         ty = typeinf_type(m[3], m[1], m[2], world)
         ty === nothing && return Any
         rt = tmerge(rt, ty)
@@ -3931,9 +3948,9 @@ end
 # make sure that typeinf is executed before turning on typeinf_ext
 # this ensures that typeinf_ext doesn't recurse before it can add the item to the workq
 
-for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10)
+for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10, typemax(UInt))
     typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end
-for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10)
+for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10, typemax(UInt))
     typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end
