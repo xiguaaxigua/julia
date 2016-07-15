@@ -1,8 +1,10 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
+const name_prefix = "$(["$m." for m in fullname(current_module())]...)"
+
 # REPL tests
 isdefined(:TestHelpers) || include(joinpath(dirname(@__FILE__), "TestHelpers.jl"))
-using TestHelpers
+using .TestHelpers
 import Base: REPL, LineEdit
 
 function fake_repl()
@@ -38,12 +40,15 @@ if !is_windows() || Sys.windows_version() >= Sys.WINDOWS_VISTA_VER
         Base.REPL.run_repl(repl)
     end
 
-    sendrepl(cmd) = write(stdin_write,"inc || wait(b); r = $cmd; notify(c); r\r")
+    sendrepl(cmd) = begin
+        write(stdin_write,"$(name_prefix)inc || wait($(name_prefix)b); r = $cmd; notify($(name_prefix)c); r\r")
+    end
 
     inc = false
     b = Condition()
     c = Condition()
     sendrepl("\"Hello REPL\"")
+
     inc=true
     begin
         notify(b)

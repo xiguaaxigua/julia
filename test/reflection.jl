@@ -161,8 +161,12 @@ not_const = 1
 ## find bindings tests
 @test ccall(:jl_get_module_of_binding, Any, (Any, Any), Base, :sin)==Base
 
+const curmod = current_module()
+const curmod_name = fullname(curmod)
+
 module TestMod7648
 using Base.Test
+import ..curmod_name, ..curmod
 export a9475, foo9475, c7648, foo7648, foo7648_nomethods, Foo7648
 
 const c7648 = 8
@@ -175,6 +179,7 @@ type Foo7648 end
     module TestModSub9475
     using Base.Test
     using ..TestMod7648
+    import ..curmod_name
     export a9475, foo9475
     a9475 = 5
     b9475 = 7
@@ -183,7 +188,8 @@ type Foo7648 end
         @test Base.binding_module(:a9475) == current_module()
         @test Base.binding_module(:c7648) == TestMod7648
         @test Base.module_name(current_module()) == :TestModSub9475
-        @test Base.fullname(current_module()) == (:TestMod7648, :TestModSub9475)
+        @test Base.fullname(current_module()) == (curmod_name..., :TestMod7648,
+                                                  :TestModSub9475)
         @test Base.module_parent(current_module()) == TestMod7648
     end
     end # module TestModSub9475
@@ -194,7 +200,7 @@ let
     @test Base.binding_module(:d7648) == current_module()
     @test Base.binding_module(:a9475) == TestModSub9475
     @test Base.module_name(current_module()) == :TestMod7648
-    @test Base.module_parent(current_module()) == Main
+    @test Base.module_parent(current_module()) == curmod
 end
 end # module TestMod7648
 
@@ -211,7 +217,7 @@ let
 end
 
 let
-    using TestMod7648
+    using .TestMod7648
     @test Base.binding_module(:a9475) == TestMod7648.TestModSub9475
     @test Base.binding_module(:c7648) == TestMod7648
     @test Base.function_name(foo7648) == :foo7648
@@ -341,7 +347,7 @@ end
 end
 
 let
-    using MacroTest
+    using .MacroTest
     a = 1
     m = getfield(current_module(), Symbol("@macrotest"))
     @test which(m, Tuple{Int,Symbol})==@which @macrotest 1 a

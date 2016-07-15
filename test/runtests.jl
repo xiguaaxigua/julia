@@ -41,7 +41,9 @@ cd(dirname(@__FILE__)) do
                     test = shift!(tests)
                     local resp
                     try
-                        resp = remotecall_fetch(t -> runtests(t), p, test)
+                        # FIXME: `remote_fetch` doesn't work when
+                        #   a new module is define.
+                        resp = remotecall_fetch(t -> runtests(t, t != "examples"), p, test)
                     catch e
                         resp = e
                     end

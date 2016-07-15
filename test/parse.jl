@@ -629,7 +629,7 @@ module A15838
     const x = :a
 end
 module B15838
-    import A15838.@f
+    import ..A15838.@f
     macro f(x); return :x; end
     const x = :b
 end

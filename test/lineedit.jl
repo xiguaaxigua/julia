@@ -2,7 +2,7 @@
 
 using Base.LineEdit
 isdefined(:TestHelpers) || include(joinpath(dirname(@__FILE__), "TestHelpers.jl"))
-using TestHelpers
+using .TestHelpers
 
 a_foo = 0
 

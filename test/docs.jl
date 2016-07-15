@@ -2,6 +2,8 @@
 
 import Base.Docs: meta, @var, DocStr, parsedoc
 
+const name_prefix = "$(["$m." for m in fullname(current_module())]...)"
+
 # Test helpers.
 function docstrings_equal(d1, d2)
     io1 = IOBuffer()
@@ -450,10 +452,13 @@ end
 end
 
 let T = meta(DocVars)[@var(DocVars.T)],
-    S = meta(DocVars)[@var(DocVars.S)]
+    S = meta(DocVars)[@var(DocVars.S)],
+    Tname = Markdown.parse("```\n$(name_prefix)DocVars.T\n```"),
+    Sname = Markdown.parse("```\n$(name_prefix)DocVars.S\n```")
+    # Splicing the expression directly doesn't work
     @test docstrings_equal(T.docs[Union{}],
         doc"""
-            DocVars.T
+        $Tname
 
         # Fields
 
@@ -464,7 +469,7 @@ let T = meta(DocVars)[@var(DocVars.T)],
     )
     @test docstrings_equal(S.docs[Union{}],
         doc"""
-            DocVars.S
+        $Sname
 
         """
     )
@@ -545,11 +550,12 @@ end
 
 @doc "This should document @m1... since its the result of expansion" @m2_11993
 @test (@doc @m1_11993) !== nothing
-let d = (@doc :@m2_11993)
+let d = (@doc :@m2_11993),
+    macro_doc = Markdown.parse("`$(name_prefix)@m2_11993` is a macro.")
     @test docstring_startswith(d, doc"""
     No documentation found.
 
-    `@m2_11993` is a macro.""")
+    $macro_doc""")
 end
 
 @doc "Now @m2... should be documented" :@m2_11993
@@ -707,56 +713,60 @@ undocumented(x,y) = 3
 
 end
 
-@test docstrings_equal(@doc(Undocumented.bindingdoesnotexist), doc"""
+doc_str = Markdown.parse("""
 No documentation found.
 
-Binding `Undocumented.bindingdoesnotexist` does not exist.
+Binding `$(name_prefix)Undocumented.bindingdoesnotexist` does not exist.
 """)
+@test docstrings_equal(@doc(Undocumented.bindingdoesnotexist), doc"$doc_str")
 
-@test docstrings_equal(@doc(Undocumented.A), doc"""
+doc_str = Markdown.parse("""
 No documentation found.
 
 **Summary:**
 ```
-abstract Undocumented.A <: Any
+abstract $(name_prefix)Undocumented.A <: Any
 ```
 
 **Subtypes:**
 ```
-Undocumented.B
-Undocumented.C
+$(name_prefix)Undocumented.B
+$(name_prefix)Undocumented.C
 ```
 """)
+@test docstrings_equal(@doc(Undocumented.A), doc"$doc_str")
 
-@test docstrings_equal(@doc(Undocumented.B), doc"""
+doc_str = Markdown.parse("""
 No documentation found.
 
 **Summary:**
 ```
-abstract Undocumented.B <: Undocumented.A
+abstract $(name_prefix)Undocumented.B <: $(name_prefix)Undocumented.A
 ```
 
 **Subtypes:**
 ```
-Undocumented.D
+$(name_prefix)Undocumented.D
 ```
 """)
+@test docstrings_equal(@doc(Undocumented.B), doc"$doc_str")
 
-@test docstrings_equal(@doc(Undocumented.C), doc"""
+doc_str = Markdown.parse("""
 No documentation found.
 
 **Summary:**
 ```
-type Undocumented.C <: Undocumented.A
+type $(name_prefix)Undocumented.C <: $(name_prefix)Undocumented.A
 ```
 """)
+@test docstrings_equal(@doc(Undocumented.C), doc"$doc_str")
 
-@test docstrings_equal(@doc(Undocumented.D), doc"""
+doc_str = Markdown.parse("""
 No documentation found.
 
 **Summary:**
 ```
-immutable Undocumented.D <: Undocumented.B
+immutable $(name_prefix)Undocumented.D <: $(name_prefix)Undocumented.B
 ```
 
 **Fields:**
@@ -766,6 +776,7 @@ two   :: String
 three :: Float64
 ```
 """)
+@test docstrings_equal(@doc(Undocumented.D), doc"$doc_str")
 
 let d = @doc Undocumented.f
     io = IOBuffer()
@@ -773,7 +784,7 @@ let d = @doc Undocumented.f
     @test startswith(takebuf_string(io),"""
     No documentation found.
 
-    `Undocumented.f` is a `Function`.
+    `$(name_prefix)Undocumented.f` is a `Function`.
     """)
 end
 
@@ -783,7 +794,7 @@ let d = @doc Undocumented.undocumented
     @test startswith(takebuf_string(io), """
     No documentation found.
 
-    `Undocumented.undocumented` is a `Function`.
+    `$(name_prefix)Undocumented.undocumented` is a `Function`.
     """)
 end
 
@@ -862,7 +873,7 @@ let x = Binding(Base, :bindingdoesnotexist)
     @test @var(Base.bindingdoesnotexist) == x
 end
 
-let x = Binding(Main, :bindingdoesnotexist)
+let x = Binding(current_module(), :bindingdoesnotexist)
     @test defined(x) == false
     @test @var(bindingdoesnotexist) == x
 end

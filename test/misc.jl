@@ -118,6 +118,8 @@ end
 @test gc_enable(true)
 
 # test methodswith
+# `methodwith` relies on exported symbols
+export func4union, Base
 immutable NoMethodHasThisType end
 @test isempty(methodswith(NoMethodHasThisType))
 @test !isempty(methodswith(Int))

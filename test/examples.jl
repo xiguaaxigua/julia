@@ -82,8 +82,7 @@ catch
 end
 
 if !zmq_found
-    eval(parse("module ZMQ end"))
+    eval(Main, parse("module ZMQ end"))
 end
 
 include(joinpath(dir, "clustermanager/0mq/ZMQCM.jl"))
-

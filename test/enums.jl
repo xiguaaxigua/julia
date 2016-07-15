@@ -1,6 +1,6 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
-module TestEnums
+const name_prefix = "$(["$m." for m in fullname(current_module())]...)"
 
 using Base.Test
 
@@ -156,7 +156,7 @@ end
 @test string(apple) == "apple"
 
 @test reprmime("text/plain", Fruit) == "Enum $(string(Fruit)):\napple = 0\norange = 1\nkiwi = 2"
-@test reprmime("text/plain", orange) == "orange::TestEnums.Fruit = 1"
+@test reprmime("text/plain", orange) == "orange::$(name_prefix)Fruit = 1"
 
 @enum LogLevel DEBUG INFO WARN ERROR CRITICAL
 @test DEBUG < CRITICAL
@@ -167,5 +167,3 @@ let b = IOBuffer()
     seekstart(b)
     @test deserialize(b) === apple
 end
-
-end # module
