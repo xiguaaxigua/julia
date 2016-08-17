@@ -1626,6 +1626,7 @@ function typeinf(method::Method, atypes::ANY, sparams::SimpleVector, needtree::B
     return typeinf_edge(method, atypes, sparams, needtree, true, true, nothing)
 end
 # compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
+# TODO: make this use a custom cache, which we then can either keep around or throw away
 function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true, hooks=InferenceHooks())
     return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, hooks)
 end

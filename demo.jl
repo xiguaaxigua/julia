@@ -1,21 +1,30 @@
+#
+# Functions
+#
+
 @inline function child(x)
     x+1
 end
 
-@inline function hack(x)
-    x+2
+@inline function hacked_child(x)
+    x+2.
 end
 
 function kernel(x)
     return child(x)
 end
 
-a = [1]
-b = [2]
-c = similar(a)
-# @call kernel(a,b,c)
+
+#
+# Auxiliary
+#
 
 replprint(x) = show(STDOUT, MIME"text/plain"(), x)
+
+
+#
+# Inference
+#
 
 f = kernel
 t = Tuple{Int}
@@ -27,11 +36,12 @@ ms = Base._methods(f, tt, -1)
 @assert(!m.isstaged)
 replprint(m.lambda_template)
 
-# given a function (type?) and argtypes, return a different function type
-# should still be resolvable with methods to look-up return type
+# given a function and the argument tuple type (incl. the function type)
+# return a tuple of the replacement function and its type, or nothing
+# TODO: any use for returning (t,ft)?
 function call_hook(f, tt)
     if f == child
-        return (hack, typeof(hack))
+        return (hacked_child, typeof(hacked_child))
     end
     return nothing
 end
@@ -41,3 +51,10 @@ hooks = Core.Inference.InferenceHooks(call_hook)
 inferred || error("inference not successful")
 println("Returns: $rettyp")
 replprint(linfo)
+
+
+#
+# IRgen
+#
+
+# TODO
