@@ -409,7 +409,7 @@ function type_depth(t::ANY)
 end
 
 function limit_type_depth(t::ANY, d::Int, cov::Bool, vars)
-    if isa(t,TypeVar) || isa(t,TypeConstructor)
+    if isa(t,TypeVar) || isa(t,UnionAll)
         return t
     end
     inexact = !cov && d > MAX_TYPE_DEPTH
@@ -450,7 +450,7 @@ function getfield_tfunc(s0::ANY, name)
     if isa(s0, TypeVar)
         s0 = s0.ub
     end
-    if isa(s0, TypeConstructor)
+    if isa(s0, UnionAll)
         s0 = s0.body
     end
     s = s0
@@ -943,7 +943,7 @@ function precise_container_types(args, types, vtypes::VarTable, sv)
         ai = args[i]
         ti = types[i]
         tti = widenconst(ti)
-        if isa(tti, TypeConstructor)
+        if isa(tti, UnionAll)
             tti = tti.body
         end
         if isa(ai, Expr) && ai.head === :call && (abstract_evals_to_constant(ai.args[1], svec, vtypes, sv) ||
