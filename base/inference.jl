@@ -762,10 +762,6 @@ end
 #### recursing into expression ####
 
 function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
-    print("Calling ", f, "\n")
-    if sv.hooks.call != nothing
-        print("Hooking call\n")
-    end
     tm = _topmod(sv)
     # don't consider more than N methods. this trades off between
     # compiler performance and generated code performance.
@@ -1027,6 +1023,15 @@ end
 argtypes_to_type(argtypes::Array{Any,1}) = Tuple{map(widenconst, argtypes)...}
 
 function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, sv::InferenceState)
+    if sv.hooks.call != nothing
+        hack = sv.hooks.call(f, argtypes_to_type(argtypes))
+        if hack != nothing
+            println("NOTICE: overriding abstract_call of ", f, " with ", hack[1])
+            f = hack[1]
+            argtypes[1] = hack[2]
+        end
+    end
+
     if is(f,_apply)
         length(fargs)>1 || return Any
         aft = argtypes[2]
@@ -3006,6 +3011,19 @@ function inlining_pass(e::Expr, sv, linfo)
         end
     end
 
+    if sv.hooks.call != nothing
+        argtypes = Vector{Any}(length(e.args))
+        argtypes[1] = ft
+        argtypes[2:end] = map(a->exprtype(a, linfo), e.args[2:end])
+
+        hack = sv.hooks.call(f, argtypes_to_type(argtypes))
+        if hack != nothing
+            println("NOTICE: overriding inlining_pass of ", f, " with ", hack[1])
+            f = hack[1]
+            ft = hack[2]
+        end
+    end
+
     if sv.inlining
         if isdefined(Main, :Base) &&
             ((isdefined(Main.Base, :^) && is(f, Main.Base.:^)) ||
@@ -3054,6 +3072,7 @@ function inlining_pass(e::Expr, sv, linfo)
             (a === Bottom || isvarargtype(a)) && return (e, stmts)
             ata[i] = a
         end
+
         res = inlineable(f, ft, e, ata, sv, linfo)
         if isa(res,Tuple)
             if isa(res[2],Array) && !isempty(res[2])
