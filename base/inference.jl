@@ -41,11 +41,20 @@ immutable Const
     val
 end
 
+immutable InferenceHooks
+    call
+
+    InferenceHooks(call) = new(call)
+    InferenceHooks() = new(nothing)
+end
+
 type InferenceState
     sp::SimpleVector     # static parameters
     label_counter::Int   # index of the current highest label for this function
     mod::Module
     currpc::LineNum
+
+    hooks::InferenceHooks
 
     # info on the state of inference and the linfo
     linfo::LambdaInfo
@@ -77,7 +86,7 @@ type InferenceState
     needtree::Bool
     inferred::Bool
 
-    function InferenceState(linfo::LambdaInfo, optimize::Bool, inlining::Bool, needtree::Bool)
+    function InferenceState(linfo::LambdaInfo, optimize::Bool, inlining::Bool, needtree::Bool, hooks::InferenceHooks)
         @assert isa(linfo.code,Array{Any,1})
         nslots = length(linfo.slotnames)
         nl = label_counter(linfo.code)+1
@@ -157,6 +166,7 @@ type InferenceState
         inmodule = isdefined(linfo, :def) ? linfo.def.module : current_module() # toplevel thunks are inferred in the current module
         frame = new(
             sp, nl, inmodule, 0,
+            hooks,
             linfo, la, s, Union{}, W, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
@@ -751,7 +761,11 @@ end
 
 #### recursing into expression ####
 
-function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
+function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
+    print("Calling ", f, "\n")
+    if sv.hooks.call != nothing
+        print("Hooking call\n")
+    end
     tm = _topmod(sv)
     # don't consider more than N methods. this trades off between
     # compiler performance and generated code performance.
@@ -1469,7 +1483,7 @@ inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
 #### entry points for inferring a LambdaInfo given a type signature ####
-function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller)
+function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller, hooks::InferenceHooks=InferenceHooks())
     local code = nothing
     local frame = nothing
     if isa(caller, LambdaInfo)
@@ -1575,7 +1589,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
     else
         # inference not started yet, make a new frame for a new lambda
         linfo.inInference = true
-        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), optimize, inlining_enabled(), needtree)
+        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), optimize, inlining_enabled(), needtree, hooks)
     end
     frame = frame::InferenceState
 
@@ -1607,11 +1621,11 @@ function typeinf(method::Method, atypes::ANY, sparams::SimpleVector, needtree::B
     return typeinf_edge(method, atypes, sparams, needtree, true, true, nothing)
 end
 # compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
-function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true)
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true, hooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, hooks)
 end
-function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool)
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool, hooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, hooks)
 end
 function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
@@ -1646,7 +1660,7 @@ function typeinf_ext(linfo::LambdaInfo)
         # toplevel lambda - infer directly
         linfo.inInference = true
         ccall(:jl_typeinf_begin, Void, ())
-        frame = InferenceState(linfo, true, inlining_enabled(), true)
+        frame = InferenceState(linfo, true, inlining_enabled(), true, InferenceHooks())
         typeinf_loop(frame)
         ccall(:jl_typeinf_end, Void, ())
         @assert frame.inferred # TODO: deal with this better
