@@ -1026,9 +1026,9 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
     if sv.hooks.call != nothing
         hack = sv.hooks.call(f, argtypes_to_type(argtypes))
         if hack != nothing
-            println("NOTICE: overriding abstract_call of ", f, " with ", hack[1])
-            f = hack[1]
-            argtypes[1] = hack[2]
+            println("NOTICE: overriding abstract_call of ", f, " with ", hack)
+            f = hack
+            argtypes[1] = typeof(f)
         end
     end
 
@@ -3019,9 +3019,9 @@ function inlining_pass(e::Expr, sv, linfo)
 
         hack = sv.hooks.call(f, argtypes_to_type(argtypes))
         if hack != nothing
-            println("NOTICE: overriding inlining_pass of ", f, " with ", hack[1])
-            f = hack[1]
-            ft = hack[2]
+            println("NOTICE: overriding inlining_pass of ", f, " with ", hack)
+            f = hack
+            ft = typeof(hack)
         end
     end
 

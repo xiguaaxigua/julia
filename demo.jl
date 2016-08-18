@@ -38,10 +38,9 @@ replprint(m.lambda_template)
 
 # given a function and the argument tuple type (incl. the function type)
 # return a tuple of the replacement function and its type, or nothing
-# TODO: any use for returning (t,ft)?
 function call_hook(f, tt)
     if f == child
-        return (hacked_child, typeof(hacked_child))
+        return hacked_child
     end
     return nothing
 end
