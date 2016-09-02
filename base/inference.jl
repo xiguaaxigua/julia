@@ -121,6 +121,7 @@ type InferenceState
         if laty > 0
             lastatype = atypes.parameters[laty]
             if isvarargtype(lastatype)
+                lastatype = unwrap_unionall(lastatype)
                 lastatype = lastatype.parameters[1]
                 laty -= 1
             end
@@ -241,7 +242,8 @@ tupletype_tail(t::ANY, n) = Tuple{t.parameters[n:end]...}
 
 cmp_tfunc = (x,y)->Bool
 
-isType(t::ANY) = isa(t,DataType) && is((t::DataType).name,Type.name)
+const _Type_name = Type.body.name
+isType(t::ANY) = isa(t,DataType) && is((t::DataType).name,_Type_name)
 
 # true if Type is inlineable as constant
 isconstType(t::ANY,b::Bool) =
@@ -274,13 +276,14 @@ add_tfunc(lt_float, 2, 2, cmp_tfunc)
 add_tfunc(le_float, 2, 2, cmp_tfunc)
 add_tfunc(fpiseq, 2, 2, cmp_tfunc)
 add_tfunc(fpislt, 2, 2, cmp_tfunc)
+const _Ref_name = Ref.body.name
 add_tfunc(Core.Intrinsics.ccall, 3, IInf,
     function(fptr, rt, at, a...)
         if !isType(rt)
             return Any
         end
         t = rt.parameters[1]
-        if isa(t,DataType) && is((t::DataType).name,Ref.name)
+        if isa(t,DataType) && is((t::DataType).name,_Ref_name)
             t = t.parameters[1]
             if is(t,Any)
                 return Union{} # a return type of Box{Any} is invalid
@@ -358,7 +361,7 @@ function typeof_tfunc(t::ANY)
             Type{TypeVar(:_,t)}
         end
     elseif isa(t,Union)
-        Union{map(typeof_tfunc, t.types)...}
+        Union{typeof_tfunc(t.a), typeof_tfunc(t.b)}
     elseif isa(t,TypeVar) && !(Any <: t.ub)
         Type{t}
     else
@@ -399,9 +402,10 @@ add_tfunc(issubtype, 2, 2,
           end)
 
 function type_depth(t::ANY)
-    if isa(t, Union)
-        t === Bottom && return 0
-        return maximum(type_depth, t.types) + 1
+    if t === Bottom
+        return 0
+    elseif isa(t, Union)
+        return max(type_depth(t.a), type_depth(t.b)) + 1
     elseif isa(t, DataType)
         return (t::DataType).depth
     end
@@ -413,26 +417,27 @@ function limit_type_depth(t::ANY, d::Int, cov::Bool, vars)
         return t
     end
     inexact = !cov && d > MAX_TYPE_DEPTH
-    if isa(t,Union)
-        t === Bottom && return t
+    if t === Bottom
+        return t
+    elseif isa(t,Union)
         if d > MAX_TYPE_DEPTH
             R = Any
         else
-            R = Union{map(x->limit_type_depth(x, d+1, cov, vars), t.types)...}
+            R = Union{map(x->limit_type_depth(x, d+1, cov, vars), (t.a,t.b))...}
         end
     elseif isa(t,DataType)
         P = t.parameters
         isempty(P) && return t
         if d > MAX_TYPE_DEPTH
-            R = t.name.primary
+            R = t.name.wrapper
         else
             stillcov = cov && (t.name === Tuple.name)
             Q = map(x->limit_type_depth(x, d+1, stillcov, vars), P)
             if !cov && _any(p->contains_is(vars,p), Q)
-                R = t.name.primary
+                R = t.name.wrapper
                 inexact = true
             else
-                R = t.name.primary{Q...}
+                R = t.name.wrapper{Q...}
             end
         end
     else
@@ -450,9 +455,7 @@ function getfield_tfunc(s0::ANY, name)
     if isa(s0, TypeVar)
         s0 = s0.ub
     end
-    if isa(s0, UnionAll)
-        s0 = s0.body
-    end
+    s0 = unwrap_unionall(s0)
     s = s0
     if isType(s)
         s = typeof(s.parameters[1])
@@ -466,7 +469,8 @@ function getfield_tfunc(s0::ANY, name)
         s = typeof(s.val)
     end
     if isa(s,Union)
-        return reduce(tmerge, Bottom, map(t->getfield_tfunc(t, name)[1], s.types)), false
+        return tmerge(getfield_tfunc(t.a, name)[1],
+                      getfield_tfunc(t.b, name)[1]), false
     end
     if isa(s,DataType)
         if s.abstract
@@ -569,7 +573,7 @@ function valid_tparam(x::ANY)
     return isa(x,Int) || isa(x,Symbol) || isa(x,Bool) || (!isa(x,Type) && isbits(x))
 end
 
-has_typevars(t::ANY, all=false) = ccall(:jl_has_typevars_, Cint, (Any,Cint), t, all)!=0
+has_typevars(t::ANY, all=false) = ccall(:jl_has_free_typevars, Cint, (Any,), t)!=0
 
 # TODO: handle e.g. apply_type(T, R::Union{Type{Int32},Type{Float64}})
 function apply_type_tfunc(args...)
@@ -609,15 +613,16 @@ function apply_type_tfunc(args...)
         elseif isa(ai, Const) && valid_tparam(ai.val)
             push!(tparams, ai.val)
         else
-            if !istuple && i-1 > length(headtype.parameters)
-                # too many parameters for type
-                return Bottom
-            end
+            #if !istuple && i-1 > length(headtype.parameters)
+            #    # too many parameters for type
+            #    return Bottom
+            #end
             uncertain = true
             if istuple
                 push!(tparams, Any)
             else
-                push!(tparams, headtype.parameters[i-1])
+                #push!(tparams, headtype.parameters[i-1])
+                break
             end
         end
     end
@@ -750,7 +755,7 @@ function limit_tuple_depth_(t::ANY, d::Int)
     if isa(t,Union)
         # also limit within Union types.
         # may have to recur into other stuff in the future too.
-        return Union{map(x->limit_tuple_depth_(x,d+1), t.types)...}
+        return Union{map(x->limit_tuple_depth_(x,d+1), (t.a,t.b))...}
     end
     if isa(t,TypeVar)
         return limit_tuple_depth_(t.ub, d)
@@ -812,7 +817,8 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
         recomputesvec = false
 
         # limit argument type tuple growth
-        lsig = length(m[3].sig.parameters)
+        msig = unwrap_unionall(m[3].sig)
+        lsig = length(msig.parameters)
         ls = length(sig.parameters)
         td = type_depth(sig)
         # look at the existing edges to detect growing argument lists
@@ -857,7 +863,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv)
                                         # if a Function argument is growing (e.g. nested closures)
                                         # then widen to the outermost function type. without this
                                         # inference fails to terminate on do_quadgk.
-                                        newsig[i] = p1[i].name.primary
+                                        newsig[i] = p1[i].name.wrapper
                                         limitdepth  = true
                                     else
                                         newsig[i] = limit_type_depth(p1[i], 1, true, [])
@@ -943,9 +949,7 @@ function precise_container_types(args, types, vtypes::VarTable, sv)
         ai = args[i]
         ti = types[i]
         tti = widenconst(ti)
-        if isa(tti, UnionAll)
-            tti = tti.body
-        end
+        tti = unwrap_unionall(tti)
         if isa(ai, Expr) && ai.head === :call && (abstract_evals_to_constant(ai.args[1], svec, vtypes, sv) ||
                                                   abstract_evals_to_constant(ai.args[1], tuple, vtypes, sv))
             aa = ai.args
@@ -1291,7 +1295,7 @@ function type_too_complex(t::ANY, d)
         return true
     end
     if isa(t,Union)
-        p = t.types
+        return type_too_complex(t.a, d+1) || type_too_complex(t.b, d+1)
     elseif isa(t,DataType)
         p = t.parameters
     elseif isa(t,TypeVar)
@@ -1358,7 +1362,7 @@ function tmerge(typea::ANY, typeb::ANY)
         end
     end
     u = Union{typea, typeb}
-    if length(u.types) > MAX_TYPEUNION_LEN || type_too_complex(u, 0)
+    if unionlen(u) > MAX_TYPEUNION_LEN || type_too_complex(u, 0)
         # don't let type unions get too big
         # TODO: something smarter, like a common supertype
         return Any
@@ -1895,6 +1899,7 @@ function isinlineable(m::Method, src::CodeInfo)
         name = m.name
         sig = m.sig
         if ((name === :+ || name === :* || name === :min || name === :max) &&
+            isa(sig,DataType) &&
             sig == Tuple{sig.parameters[1],Any,Any,Any,Vararg{Any}})
             inlineable = true
         elseif (name === :next || name === :done || name === :unsafe_convert ||
@@ -2353,7 +2358,7 @@ function countunionsplit(atypes::Vector{Any})
     nu = 1
     for ti in atypes
         if isa(ti, Union)
-            nu *= length((ti::Union).types)
+            nu *= unionlen(ti::Union)
         end
     end
     return nu
@@ -2455,7 +2460,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
                         local all = true
                         local stmts = []
                         local aei = ex.args[i]
-                        for ty in (ti::Union).types; local ty
+                        for ty in uniontypes(ti::Union); local ty
                             atypes[i] = ty
                             local match = splitunion(atypes, i - 1)
                             if match !== false

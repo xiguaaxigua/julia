@@ -1702,11 +1702,6 @@ static int type_eqv_(jl_value_t *a, jl_value_t *b)
 }
 #endif
 
-JL_DLLEXPORT int jl_types_equal(jl_value_t *a, jl_value_t *b)
-{
-    return jl_subtype(a, b) && jl_subtype(b, a);
-}
-
 // type cache
 
 static int contains_unions(jl_value_t *type)
@@ -1964,8 +1959,11 @@ static int within_typevar(jl_value_t *t, jl_tvar_t *v)
 {
     jl_value_t *lb = t, *ub = t;
     if (jl_is_typevar(t)) {
-        lb = ((jl_tvar_t*)t)->lb;
-        ub = ((jl_tvar_t*)t)->ub;
+        // TODO: automatically restrict typevars in method definitions based on
+        // types they are used in.
+        return 1;
+        //lb = ((jl_tvar_t*)t)->lb;
+        //ub = ((jl_tvar_t*)t)->ub;
     }
     else if (!jl_is_type(t)) {
         return v->lb == jl_bottom_type && v->ub == jl_any_type;
@@ -2465,21 +2463,20 @@ static jl_value_t *inst_type_w_(jl_value_t *t, jl_typeenv_t *env, jl_typestack_t
     if (tn == jl_tuple_typename)
         return inst_tuple_w_(t, env, stack, check);
     size_t ntp = jl_svec_len(tp);
+    jl_value_t *wrapper = tn->wrapper;
     jl_value_t **iparams;
     JL_GC_PUSHARGS(iparams, ntp);
     int cacheable = 1, bound = 0;
     for(i=0; i < ntp; i++) {
         jl_value_t *elt = jl_svecref(tp, i);
         iparams[i] = (jl_value_t*)inst_type_w_(elt, env, stack, check);
-        /*
-        if (jl_is_typevar(tv) && !jl_is_typevar(iparams[i])) {
-            if (!jl_subtype(iparams[i], tv)) {
-                jl_type_error_rt(jl_symbol_name(tt->name->name),
-                                 jl_symbol_name(((jl_tvar_t*)tv)->name),
-                                 tv, iparams[i]);
-            }
+        assert(jl_is_unionall(wrapper));
+        jl_tvar_t *tv = ((jl_unionall_t*)wrapper)->var;
+        if (!within_typevar(iparams[i], tv)) {
+            jl_type_error_rt(jl_symbol_name(tn->name), jl_symbol_name(tv->name),
+                             tv, iparams[i]);
         }
-        */
+        wrapper = ((jl_unionall_t*)wrapper)->body;
         bound |= (iparams[i] != elt);
         if (cacheable && jl_has_free_typevars(iparams[i]))
             cacheable = 0;
@@ -3375,6 +3372,7 @@ void jl_init_types(void)
     jl_bottomtype_type = jl_new_datatype(jl_symbol("Bottom"), type_type, jl_emptysvec,
                                          jl_emptysvec, jl_emptysvec, 0, 0, 0);
     jl_bottom_type = jl_new_struct(jl_bottomtype_type);
+    jl_bottomtype_type->instance = jl_bottom_type;
 
     jl_uniontype_type = jl_new_datatype(jl_symbol("Union"), type_type, jl_emptysvec,
                                         jl_svec(2, jl_symbol("a"), jl_symbol("b")),
