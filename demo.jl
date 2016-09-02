@@ -38,6 +38,7 @@ replprint(m.lambda_template)
 
 # given a function and the argument tuple type (incl. the function type)
 # return a tuple of the replacement function and its type, or nothing
+# IDEA: define multiple hook methods, eg. `call_hook(f::child, tt)`
 function call_hook(f, tt)
     if f == child
         return hacked_child
@@ -46,7 +47,12 @@ function call_hook(f, tt)
 end
 hooks = Core.Inference.InferenceHooks(call_hook)
 
-(linfo, rettyp, inferred) = Core.Inference.typeinf_uncached(m, sig, spvals, optimize=true, hooks=hooks)
+# raise limits on inference parameters, performing a more exhaustive search
+params = Core.Inference.InferenceParams(64)
+
+(linfo, rettyp, inferred) =
+    Core.Inference.typeinf_uncached(m, sig, spvals, optimize=true,
+                                    params=params, hooks=hooks)
 inferred || error("inference not successful")
 println("Returns: $rettyp")
 replprint(linfo)

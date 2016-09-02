@@ -6,11 +6,15 @@ import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 const MAX_TYPEUNION_LEN = 3
 const MAX_TYPE_DEPTH = 7
 const MAX_TUPLETYPE_LEN = 15
-const MAX_TUPLE_DEPTH = 4
 
 const MAX_TUPLE_SPLAT = 16
 const MAX_UNION_SPLITTING = 4
 const UNION_SPLIT_MISMATCH_ERROR = false
+
+immutable InferenceParams
+    MAX_TUPLE_DEPTH
+end
+const DEFAULT_PARAMS = InferenceParams(4)
 
 # alloc_elim_pass! relies on `Slot_AssignedOnce | Slot_UsedUndef` being
 # SSA. This should be true now but can break if we start to track conditional
@@ -54,6 +58,7 @@ type InferenceState
     mod::Module
     currpc::LineNum
 
+    params::InferenceParams
     hooks::InferenceHooks
 
     # info on the state of inference and the linfo
@@ -86,7 +91,8 @@ type InferenceState
     needtree::Bool
     inferred::Bool
 
-    function InferenceState(linfo::LambdaInfo, optimize::Bool, inlining::Bool, needtree::Bool, hooks::InferenceHooks)
+    function InferenceState(linfo::LambdaInfo, optimize::Bool, inlining::Bool, needtree::Bool,
+                            params::InferenceParams, hooks::InferenceHooks)
         @assert isa(linfo.code,Array{Any,1})
         nslots = length(linfo.slotnames)
         nl = label_counter(linfo.code)+1
@@ -119,7 +125,7 @@ type InferenceState
                     end
                     s[1][la] = VarState(Tuple,false)
                 else
-                    s[1][la] = VarState(tuple_tfunc(limit_tuple_depth(tupletype_tail(atypes,la))),false)
+                    s[1][la] = VarState(tuple_tfunc(limit_tuple_depth(params, tupletype_tail(atypes,la))),false)
                 end
                 la -= 1
             end
@@ -166,7 +172,7 @@ type InferenceState
         inmodule = isdefined(linfo, :def) ? linfo.def.module : current_module() # toplevel thunks are inferred in the current module
         frame = new(
             sp, nl, inmodule, 0,
-            hooks,
+            params, hooks,
             linfo, la, s, Union{}, W, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
@@ -662,7 +668,7 @@ function builtin_tfunction(f::ANY, argtypes::Array{Any,1}, sv::InferenceState)
     if is(f,tuple)
         for a in argtypes
             if !isa(a, Const)
-                return tuple_tfunc(limit_tuple_depth(argtypes_to_type(argtypes)))
+                return tuple_tfunc(limit_tuple_depth(sv.params, argtypes_to_type(argtypes)))
             end
         end
         return Const(tuple(map(a->a.val, argtypes)...))
@@ -725,24 +731,24 @@ function builtin_tfunction(f::ANY, argtypes::Array{Any,1}, sv::InferenceState)
     return tf[3](argtypes...)
 end
 
-limit_tuple_depth(t::ANY) = limit_tuple_depth_(t,0)
+limit_tuple_depth(params::InferenceParams, t::ANY) = limit_tuple_depth_(params,t,0)
 
-function limit_tuple_depth_(t::ANY, d::Int)
+function limit_tuple_depth_(params::InferenceParams, t::ANY, d::Int)
     if isa(t,Union)
         # also limit within Union types.
         # may have to recur into other stuff in the future too.
-        return Union{map(x->limit_tuple_depth_(x,d+1), t.types)...}
+        return Union{map(x->limit_tuple_depth_(params,x,d+1), t.types)...}
     end
     if isa(t,TypeVar)
-        return limit_tuple_depth_(t.ub, d)
+        return limit_tuple_depth_(params, t.ub, d)
     end
     if !(isa(t,DataType) && t.name === Tuple.name)
         return t
     end
-    if d > MAX_TUPLE_DEPTH
+    if d > params.MAX_TUPLE_DEPTH
         return Tuple
     end
-    p = map(x->limit_tuple_depth_(x,d+1), t.parameters)
+    p = map(x->limit_tuple_depth_(params,x,d+1), t.parameters)
     Tuple{p...}
 end
 
@@ -1488,7 +1494,7 @@ inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
 #### entry points for inferring a LambdaInfo given a type signature ####
-function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller, hooks::InferenceHooks=InferenceHooks())
+function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller, params::InferenceParams=DEFAULT_PARAMS, hooks::InferenceHooks=InferenceHooks())
     local code = nothing
     local frame = nothing
     if isa(caller, LambdaInfo)
@@ -1594,7 +1600,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
     else
         # inference not started yet, make a new frame for a new lambda
         linfo.inInference = true
-        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), optimize, inlining_enabled(), needtree, hooks)
+        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), optimize, inlining_enabled(), needtree, params, hooks)
     end
     frame = frame::InferenceState
 
@@ -1627,11 +1633,11 @@ function typeinf(method::Method, atypes::ANY, sparams::SimpleVector, needtree::B
 end
 # compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
 # TODO: make this use a custom cache, which we then can either keep around or throw away
-function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true, hooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, hooks)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true, params=DEFAULT_PARAMS, hooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, params, hooks)
 end
-function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool, hooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, hooks)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool, params=DEFAULT_PARAMS, hooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, params, hooks)
 end
 function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
@@ -1666,7 +1672,7 @@ function typeinf_ext(linfo::LambdaInfo)
         # toplevel lambda - infer directly
         linfo.inInference = true
         ccall(:jl_typeinf_begin, Void, ())
-        frame = InferenceState(linfo, true, inlining_enabled(), true, InferenceHooks())
+        frame = InferenceState(linfo, true, inlining_enabled(), true, DEFAULT_PARAMS, InferenceHooks())
         typeinf_loop(frame)
         ccall(:jl_typeinf_end, Void, ())
         @assert frame.inferred # TODO: deal with this better
