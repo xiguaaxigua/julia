@@ -48,7 +48,7 @@ end
 hooks = Core.Inference.InferenceHooks(call_hook)
 
 # raise limits on inference parameters, performing a more exhaustive search
-params = Core.Inference.InferenceParams(64)
+params = Core.Inference.InferenceParams(15, 16, 4, 4)
 
 (linfo, rettyp, inferred) =
     Core.Inference.typeinf_uncached(m, sig, spvals, optimize=true,

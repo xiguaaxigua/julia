@@ -5,16 +5,16 @@ import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 #### parameters limiting potentially-infinite types ####
 const MAX_TYPEUNION_LEN = 3
 const MAX_TYPE_DEPTH = 7
-const MAX_TUPLETYPE_LEN = 15
 
-const MAX_TUPLE_SPLAT = 16
-const MAX_UNION_SPLITTING = 4
 const UNION_SPLIT_MISMATCH_ERROR = false
 
 immutable InferenceParams
+    MAX_TUPLETYPE_LEN
+    MAX_TUPLE_SPLAT
+    MAX_UNION_SPLITTING
     MAX_TUPLE_DEPTH
 end
-const DEFAULT_PARAMS = InferenceParams(4)
+const DEFAULT_PARAMS = InferenceParams(15,16, 4, 4)
 
 # alloc_elim_pass! relies on `Slot_AssignedOnce | Slot_UsedUndef` being
 # SSA. This should be true now but can break if we start to track conditional
@@ -637,7 +637,7 @@ function invoke_tfunc(f::ANY, types::ANY, argtype::ANY, sv::InferenceState)
     if !isleaftype(Type{types})
         return Any
     end
-    argtype = typeintersect(types,limit_tuple_type(argtype))
+    argtype = typeintersect(types,limit_tuple_type(argtype, sv))
     if is(argtype,Bottom)
         return Bottom
     end
@@ -752,9 +752,9 @@ function limit_tuple_depth_(params::InferenceParams, t::ANY, d::Int)
     Tuple{p...}
 end
 
-limit_tuple_type = (t::ANY) -> limit_tuple_type_n(t, MAX_TUPLETYPE_LEN)
+limit_tuple_type = (t::ANY, sv::InferenceState) -> limit_tuple_type_n(t, sv.params.MAX_TUPLETYPE_LEN, sv)
 
-function limit_tuple_type_n(t::ANY, lim::Int)
+function limit_tuple_type_n(t::ANY, lim::Int, sv::InferenceState)
     p = t.parameters
     n = length(p)
     if n > lim
@@ -776,7 +776,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
     # It is important for N to be >= the number of methods in the error()
     # function, so we can still know that error() is always Bottom.
     # here I picked 4.
-    argtype = limit_tuple_type(argtype)
+    argtype = limit_tuple_type(argtype, sv)
     argtypes = argtype.parameters
     applicable = _methods_by_ftype(argtype, 4)
     rettype = Bottom
@@ -885,7 +885,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                     end
                 end
                 if !allsame
-                    sig = limit_tuple_type_n(sig, lsig + 1)
+                    sig = limit_tuple_type_n(sig, lsig + 1, sv)
                     recomputesvec = true
                 end
             end
@@ -971,9 +971,9 @@ function abstract_apply(af::ANY, fargs, aargtypes::Vector{Any}, vtypes::VarTable
         # can be collapsed to a call to the applied func
         at = append_any(Any[type_typeof(af)], ctypes...)
         n = length(at)
-        if n-1 > MAX_TUPLETYPE_LEN
-            tail = foldl((a,b)->tmerge(a,unwrapva(b)), Bottom, at[MAX_TUPLETYPE_LEN+1:n])
-            at = vcat(at[1:MAX_TUPLETYPE_LEN], Any[Vararg{tail}])
+        if n-1 > sv.params.MAX_TUPLETYPE_LEN
+            tail = foldl((a,b)->tmerge(a,unwrapva(b)), Bottom, at[sv.params.MAX_TUPLETYPE_LEN+1:n])
+            at = vcat(at[1:sv.params.MAX_TUPLETYPE_LEN], Any[Vararg{tail}])
         end
         return abstract_call(af, (), at, vtypes, sv)
     end
@@ -2441,7 +2441,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     function invoke_NF()
         # converts a :call to :invoke
         local nu = countunionsplit(atypes)
-        nu > MAX_UNION_SPLITTING && return NF
+        nu > sv.params.MAX_UNION_SPLITTING && return NF
 
         if nu > 1
             local spec_hit = nothing
@@ -2545,8 +2545,8 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
         return invoke_NF()
     end
 
-    if length(atype_unlimited.parameters) - 1 > MAX_TUPLETYPE_LEN
-        atype = limit_tuple_type(atype_unlimited)
+    if length(atype_unlimited.parameters) - 1 > sv.params.MAX_TUPLETYPE_LEN
+        atype = limit_tuple_type(atype_unlimited, sv)
     else
         atype = atype_unlimited
     end
@@ -3111,7 +3111,7 @@ function inlining_pass(e::Expr, sv, linfo)
                 elseif isa(aarg, Tuple)
                     newargs[i-2] = Any[ QuoteNode(x) for x in aarg ]
                 elseif isa(t, DataType) && t.name === Tuple.name && !isvatuple(t) &&
-                        effect_free(aarg, linfo, true) && length(t.parameters) <= MAX_TUPLE_SPLAT
+                        effect_free(aarg, linfo, true) && length(t.parameters) <= sv.params.MAX_TUPLE_SPLAT
                     # apply(f,t::(x,y)) => f(t[1],t[2])
                     tp = t.parameters
                     newargs[i-2] = Any[ mk_getfield(aarg,j,tp[j]) for j=1:length(tp) ]
