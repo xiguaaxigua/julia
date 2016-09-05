@@ -231,7 +231,7 @@ tupletype_tail(t::ANY, n) = Tuple{t.parameters[n:end]...}
 
 #### type-functions for builtins / intrinsics ####
 
-cmp_tfunc = (x,y)->Bool
+cmp_tfunc = (sv,x,y)->Bool
 
 isType(t::ANY) = isa(t,DataType) && is((t::DataType).name,Type.name)
 
@@ -247,8 +247,8 @@ function add_tfunc(f::Function, minarg::Int, maxarg::Int, tfunc::ANY)
     push!(t_ffunc_key, f)
     push!(t_ffunc_val, (minarg, maxarg, tfunc))
 end
-add_tfunc(throw, 1, 1, x->Bottom)
-add_tfunc(box, 2, 2, (t,v)->(isType(t) ? t.parameters[1] : Any))
+add_tfunc(throw, 1, 1, (sv,x)->Bottom)
+add_tfunc(box, 2, 2, (sv,t,v)->(isType(t) ? t.parameters[1] : Any))
 add_tfunc(eq_int, 2, 2, cmp_tfunc)
 add_tfunc(ne_int, 2, 2, cmp_tfunc)
 add_tfunc(slt_int, 2, 2, cmp_tfunc)
@@ -262,7 +262,7 @@ add_tfunc(le_float, 2, 2, cmp_tfunc)
 add_tfunc(fpiseq, 2, 2, cmp_tfunc)
 add_tfunc(fpislt, 2, 2, cmp_tfunc)
 add_tfunc(Core.Intrinsics.ccall, 3, IInf,
-    function(fptr, rt, at, a...)
+    function(sv, fptr, rt, at, a...)
         if !isType(rt)
             return Any
         end
@@ -277,12 +277,12 @@ add_tfunc(Core.Intrinsics.ccall, 3, IInf,
         return t
     end)
 add_tfunc(Core.Intrinsics.llvmcall, 3, IInf,
-    (fptr, rt, at, a...)->(isType(rt) ? rt.parameters[1] : Any))
+    (sv, fptr, rt, at, a...)->(isType(rt) ? rt.parameters[1] : Any))
 add_tfunc(Core.Intrinsics.cglobal, 1, 2,
-    (fptr, t...)->(isempty(t) ? Ptr{Void} :
+    (sv, fptr, t...)->(isempty(t) ? Ptr{Void} :
                    isType(t[1]) ? Ptr{t[1].parameters[1]} : Ptr))
 add_tfunc(Core.Intrinsics.select_value, 3, 3,
-    function (cnd, x, y)
+    function (sv, cnd, x, y)
         if isa(cnd, Const)
             if cnd.val === true
                 return x
@@ -296,7 +296,7 @@ add_tfunc(Core.Intrinsics.select_value, 3, 3,
         tmerge(x, y)
     end)
 add_tfunc(is, 2, 2,
-    function (x::ANY, y::ANY)
+    function (sv, x::ANY, y::ANY)
         if isa(x,Const) && isa(y,Const)
             return Const(x.val===y.val)
         elseif isType(x) && isType(y) && isleaftype(x) && isleaftype(y)
@@ -310,23 +310,23 @@ add_tfunc(is, 2, 2,
             return Bool
         end
     end)
-add_tfunc(isdefined, 1, IInf, (args...)->Bool)
-add_tfunc(Core.sizeof, 1, 1, x->Int)
-add_tfunc(nfields, 1, 1, x->(isa(x,Const) ? Const(nfields(x.val)) :
-                             isType(x) && isleaftype(x.parameters[1]) ? Const(nfields(x.parameters[1])) :
-                             Int))
-add_tfunc(Core._expr, 1, IInf, (args...)->Expr)
-add_tfunc(applicable, 1, IInf, (f, args...)->Bool)
-add_tfunc(Core.Intrinsics.arraylen, 1, 1, x->Int)
-add_tfunc(arraysize, 2, 2, (a,d)->Int)
+add_tfunc(isdefined, 1, IInf, (sv, args...)->Bool)
+add_tfunc(Core.sizeof, 1, 1, (sv,x)->Int)
+add_tfunc(nfields, 1, 1, (sv,x)->(isa(x,Const) ? Const(nfields(x.val)) :
+                                  isType(x) && isleaftype(x.parameters[1]) ? Const(nfields(x.parameters[1])) :
+                                  Int))
+add_tfunc(Core._expr, 1, IInf, (sv, args...)->Expr)
+add_tfunc(applicable, 1, IInf, (sv, f, args...)->Bool)
+add_tfunc(Core.Intrinsics.arraylen, 1, 1, (sv,x)->Int)
+add_tfunc(arraysize, 2, 2, (sv,a,d)->Int)
 add_tfunc(pointerref, 3, 3,
-          function (a,i,align)
+          function (sv,a,i,align)
               a = widenconst(a)
               isa(a,DataType) && a<:Ptr && isa(a.parameters[1],Union{Type,TypeVar}) ? a.parameters[1] : Any
           end)
-add_tfunc(pointerset, 4, 4, (a,v,i,align)->a)
+add_tfunc(pointerset, 4, 4, (sv,a,v,i,align)->a)
 
-function typeof_tfunc(t::ANY)
+function typeof_tfunc(sv, t::ANY)
     if isa(t,Const)
         return Type{typeof(t.val)}
     elseif isType(t)
@@ -345,7 +345,7 @@ function typeof_tfunc(t::ANY)
             Type{TypeVar(:_,t)}
         end
     elseif isa(t,Union)
-        Union{map(typeof_tfunc, t.types)...}
+        Union{map(t -> typeof_tfunc(sv,t), t.types)...}
     elseif isa(t,TypeVar) && !(Any <: t.ub)
         Type{t}
     else
@@ -354,7 +354,7 @@ function typeof_tfunc(t::ANY)
 end
 add_tfunc(typeof, 1, 1, typeof_tfunc)
 add_tfunc(typeassert, 2, 2,
-          function (v, t)
+          function (sv, v, t)
               if isType(t)
                   if isa(v,Const)
                       if isleaftype(t) && !isa(v.val, t.parameters[1])
@@ -367,7 +367,7 @@ add_tfunc(typeassert, 2, 2,
               return v
           end)
 add_tfunc(isa, 2, 2,
-          function (v, t)
+          function (sv, v, t)
               if isType(t) && isleaftype(t)
                   if v ⊑ t.parameters[1]
                       return Const(true)
@@ -378,7 +378,7 @@ add_tfunc(isa, 2, 2,
               return Bool
           end)
 add_tfunc(issubtype, 2, 2,
-          function (a, b)
+          function (sv, a, b)
               if isType(a) && isType(b) && isleaftype(a) && isleaftype(b)
                   return Const(issubtype(a.parameters[1], b.parameters[1]))
               end
@@ -433,7 +433,7 @@ function limit_type_depth(t::ANY, d::Int, cov::Bool, vars)
 end
 
 # returns (type, isexact)
-function getfield_tfunc(s0::ANY, name)
+function getfield_tfunc(sv::InferenceState, s0::ANY, name)
     if isa(s0, TypeVar)
         s0 = s0.ub
     end
@@ -453,7 +453,7 @@ function getfield_tfunc(s0::ANY, name)
         s = typeof(s.val)
     end
     if isa(s,Union)
-        return reduce(tmerge, Bottom, map(t->getfield_tfunc(t, name)[1], s.types)), false
+        return reduce(tmerge, Bottom, map(t->getfield_tfunc(sv, t, name)[1], s.types)), false
     end
     if isa(s,DataType)
         if s.abstract
@@ -530,15 +530,15 @@ function getfield_tfunc(s0::ANY, name)
         end
     end
 end
-add_tfunc(getfield, 2, 2, (s,name)->getfield_tfunc(s,name)[1])
-add_tfunc(setfield!, 3, 3, (o, f, v)->v)
-function fieldtype_tfunc(s::ANY, name)
+add_tfunc(getfield, 2, 2, (sv,s,name)->getfield_tfunc(sv,s,name)[1])
+add_tfunc(setfield!, 3, 3, (sv, o, f, v)->v)
+function fieldtype_tfunc(sv, s::ANY, name)
     if isType(s)
         s = s.parameters[1]
     else
         return Type
     end
-    t, exact = getfield_tfunc(s, name)
+    t, exact = getfield_tfunc(sv, s, name)
     if is(t,Bottom)
         return t
     end
@@ -559,7 +559,7 @@ end
 has_typevars(t::ANY, all=false) = ccall(:jl_has_typevars_, Cint, (Any,Cint), t, all)!=0
 
 # TODO: handle e.g. apply_type(T, R::Union{Type{Int32},Type{Float64}})
-function apply_type_tfunc(args...)
+function apply_type_tfunc(sv, args...)
     if !isType(args[1])
         return Any
     end
@@ -728,7 +728,7 @@ function builtin_tfunction(f::ANY, argtypes::Array{Any,1}, sv::InferenceState)
         # wrong # of args
         return Bottom
     end
-    return tf[3](argtypes...)
+    return tf[3](sv, argtypes...)
 end
 
 limit_tuple_depth(params::InferenceParams, t::ANY) = limit_tuple_depth_(params,t,0)
@@ -1082,12 +1082,12 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
             # allow tuple indexing functions to take advantage of constant
             # index arguments.
             if istopfunction(tm, f, :getindex)
-                return getfield_tfunc(argtypes[2], argtypes[3])[1]
+                return getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
             elseif istopfunction(tm, f, :next)
-                t1 = getfield_tfunc(argtypes[2], argtypes[3])[1]
+                t1 = getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
                 return t1===Bottom ? Bottom : Tuple{t1, Int}
             elseif istopfunction(tm, f, :indexed_next)
-                t1 = getfield_tfunc(argtypes[2], argtypes[3])[1]
+                t1 = getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
                 return t1===Bottom ? Bottom : Tuple{t1, Int}
             end
         end
