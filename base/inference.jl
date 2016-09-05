@@ -4,17 +4,17 @@ import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 
 #### parameters limiting potentially-infinite types ####
 const MAX_TYPEUNION_LEN = 3
-const MAX_TYPE_DEPTH = 7
 
 const UNION_SPLIT_MISMATCH_ERROR = false
 
 immutable InferenceParams
+    MAX_TYPE_DEPTH
     MAX_TUPLETYPE_LEN
     MAX_TUPLE_SPLAT
     MAX_UNION_SPLITTING
     MAX_TUPLE_DEPTH
 end
-const DEFAULT_PARAMS = InferenceParams(15,16, 4, 4)
+const DEFAULT_PARAMS = InferenceParams(7, 15, 16, 4, 4)
 
 # alloc_elim_pass! relies on `Slot_AssignedOnce | Slot_UsedUndef` being
 # SSA. This should be true now but can break if we start to track conditional
@@ -395,26 +395,26 @@ function type_depth(t::ANY)
     return 0
 end
 
-function limit_type_depth(t::ANY, d::Int, cov::Bool, vars)
+function limit_type_depth(t::ANY, d::Int, cov::Bool, vars, sv::InferenceState)
     if isa(t,TypeVar) || isa(t,TypeConstructor)
         return t
     end
-    inexact = !cov && d > MAX_TYPE_DEPTH
+    inexact = !cov && d > sv.params.MAX_TYPE_DEPTH
     if isa(t,Union)
         t === Bottom && return t
-        if d > MAX_TYPE_DEPTH
+        if d > sv.params.MAX_TYPE_DEPTH
             R = Any
         else
-            R = Union{map(x->limit_type_depth(x, d+1, cov, vars), t.types)...}
+            R = Union{map(x->limit_type_depth(x, d+1, cov, vars, sv), t.types)...}
         end
     elseif isa(t,DataType)
         P = t.parameters
         isempty(P) && return t
-        if d > MAX_TYPE_DEPTH
+        if d > sv.params.MAX_TYPE_DEPTH
             R = t.name.primary
         else
             stillcov = cov && (t.name === Tuple.name)
-            Q = map(x->limit_type_depth(x, d+1, stillcov, vars), P)
+            Q = map(x->limit_type_depth(x, d+1, stillcov, vars, sv), P)
             if !cov && _any(p->contains_is(vars,p), Q)
                 R = t.name.primary
                 inexact = true
@@ -494,7 +494,8 @@ function getfield_tfunc(sv::InferenceState, s0::ANY, name)
                     # since the UnionAll type bound is otherwise incorrect
                     # in the current type system
                     typ = limit_type_depth(R, 0, true,
-                                           filter!(x->isa(x,TypeVar), Any[s.parameters...]))
+                                           filter!(x->isa(x,TypeVar), Any[s.parameters...]),
+                                           sv)
                     return typ, isleaftype(s) && isa(R, Type) && typeof(R) === typeof(typ) && typeseq(R, typ)
                 end
             end
@@ -525,7 +526,8 @@ function getfield_tfunc(sv::InferenceState, s0::ANY, name)
             return R, alleq
         else
             typ = limit_type_depth(R, 0, true,
-                                   filter!(x->isa(x,TypeVar), Any[s.parameters...]))
+                                   filter!(x->isa(x,TypeVar), Any[s.parameters...]),
+                                   sv)
             return typ, alleq && isleaftype(s) && typeof(R) === typeof(typ) && typeseq(R, typ)
         end
     end
@@ -559,7 +561,7 @@ end
 has_typevars(t::ANY, all=false) = ccall(:jl_has_typevars_, Cint, (Any,Cint), t, all)!=0
 
 # TODO: handle e.g. apply_type(T, R::Union{Type{Int32},Type{Float64}})
-function apply_type_tfunc(sv, args...)
+function apply_type_tfunc(sv::InferenceState, args...)
     if !isType(args[1])
         return Any
     end
@@ -619,7 +621,7 @@ function apply_type_tfunc(sv, args...)
         uncertain = true
     end
     !uncertain && return Type{appl}
-    if type_too_complex(appl,0)
+    if type_too_complex(appl, 0, sv)
         return Type{TypeVar(:_,headtype)}
     end
     !(isa(appl,TypeVar) || isvarargtype(appl)) ? Type{TypeVar(:_,appl)} : Type{appl}
@@ -829,8 +831,8 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                     end
                     if mightlimitdepth && td > type_depth(infstate.linfo.specTypes)
                         # impose limit if we recur and the argument types grow beyond MAX_TYPE_DEPTH
-                        if td > MAX_TYPE_DEPTH
-                            sig = limit_type_depth(sig, 0, true, [])
+                        if td > sv.params.MAX_TYPE_DEPTH
+                            sig = limit_type_depth(sig, 0, true, [], sv)
                             recomputesvec = true
                             break
                         else
@@ -847,7 +849,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                                         newsig[i] = p1[i].name.primary
                                         limitdepth  = true
                                     else
-                                        newsig[i] = limit_type_depth(p1[i], 1, true, [])
+                                        newsig[i] = limit_type_depth(p1[i], 1, true, [], sv)
                                     end
                                 end
                                 if limitdepth
@@ -864,8 +866,8 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
 
 #        # limit argument type size growth
 #        tdepth = type_depth(sig)
-#        if tdepth > MAX_TYPE_DEPTH
-#            sig = limit_type_depth(sig, 0, true, [])
+#        if tdepth > sv.params.MAX_TYPE_DEPTH
+#            sig = limit_type_depth(sig, 0, true, [], sv)
 #        end
 
         # limit length based on size of definition signature.
@@ -1282,8 +1284,8 @@ function abstract_interpret(e::ANY, vtypes::VarTable, sv::InferenceState)
     return vtypes
 end
 
-function type_too_complex(t::ANY, d)
-    if d > MAX_TYPE_DEPTH
+function type_too_complex(t::ANY, d, sv::InferenceState)
+    if d > sv.params.MAX_TYPE_DEPTH
         return true
     end
     if isa(t,Union)
@@ -1291,12 +1293,12 @@ function type_too_complex(t::ANY, d)
     elseif isa(t,DataType)
         p = t.parameters
     elseif isa(t,TypeVar)
-        return type_too_complex(t.lb,d+1) || type_too_complex(t.ub,d+1)
+        return type_too_complex(t.lb, d+1, sv) || type_too_complex(t.ub, d+1, sv)
     else
         return false
     end
     for x in (p::SimpleVector)
-        if type_too_complex(x, d+1)
+        if type_too_complex(x, d+1, sv)
             return true
         end
     end
@@ -1354,7 +1356,7 @@ function tmerge(typea::ANY, typeb::ANY)
         end
     end
     u = Union{typea, typeb}
-    if length(u.types) > MAX_TYPEUNION_LEN || type_too_complex(u, 0)
+    if length(u.types) > MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv)  # FIXME: use of global_sv
         # don't let type unions get too big
         # TODO: something smarter, like a common supertype
         return Any
