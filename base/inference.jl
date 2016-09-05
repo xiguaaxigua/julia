@@ -3,18 +3,18 @@
 import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 
 #### parameters limiting potentially-infinite types ####
-const MAX_TYPEUNION_LEN = 3
-
-const UNION_SPLIT_MISMATCH_ERROR = false
-
 immutable InferenceParams
+    MAX_TYPEUNION_LEN
     MAX_TYPE_DEPTH
     MAX_TUPLETYPE_LEN
+    MAX_TUPLE_DEPTH
+
     MAX_TUPLE_SPLAT
     MAX_UNION_SPLITTING
-    MAX_TUPLE_DEPTH
 end
-const DEFAULT_PARAMS = InferenceParams(7, 15, 16, 4, 4)
+const DEFAULT_PARAMS = InferenceParams(3, 7, 15, 16, 4, 4)
+
+const UNION_SPLIT_MISMATCH_ERROR = false
 
 # alloc_elim_pass! relies on `Slot_AssignedOnce | Slot_UsedUndef` being
 # SSA. This should be true now but can break if we start to track conditional
@@ -1356,7 +1356,7 @@ function tmerge(typea::ANY, typeb::ANY)
         end
     end
     u = Union{typea, typeb}
-    if length(u.types) > MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv)  # FIXME: use of global_sv
+    if length(u.types) > global_sv.params.MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv)
         # don't let type unions get too big
         # TODO: something smarter, like a common supertype
         return Any
