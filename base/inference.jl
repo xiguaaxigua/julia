@@ -2,15 +2,15 @@
 
 import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 
-#### parameters limiting potentially-infinite types ####
 immutable InferenceParams
-    MAX_TYPEUNION_LEN
-    MAX_TYPE_DEPTH
-    MAX_TUPLETYPE_LEN
-    MAX_TUPLE_DEPTH
+    # parameters limiting potentially-infinite types
+    MAX_TYPEUNION_LEN::Int
+    MAX_TYPE_DEPTH::Int
+    MAX_TUPLETYPE_LEN::Int
+    MAX_TUPLE_DEPTH::Int
 
-    MAX_TUPLE_SPLAT
-    MAX_UNION_SPLITTING
+    MAX_TUPLE_SPLAT::Int
+    MAX_UNION_SPLITTING::Int
 end
 const DEFAULT_PARAMS = InferenceParams(3, 7, 15, 16, 4, 4)
 
