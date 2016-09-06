@@ -2,7 +2,12 @@
 
 import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 
-immutable InferenceParams
+type InferenceParams
+    # optimization
+    optimize::Bool
+    inlining::Bool
+    needtree::Bool  # assigned to, hence not immutable
+
     # parameters limiting potentially-infinite types
     MAX_TYPEUNION_LEN::Int
     MAX_TYPE_DEPTH::Int
@@ -11,8 +16,13 @@ immutable InferenceParams
 
     MAX_TUPLE_SPLAT::Int
     MAX_UNION_SPLITTING::Int
+
+    InferenceParams(;optimize::Bool=true, inlining::Bool=inlining_enabled(), needtree::Bool=true,
+                    typeunion_len=3::Int, type_depth=7::Int, tupletype_len=15::Int,
+                    tuple_depth=16::Int, tuple_splat=4::Int, union_splitting=4::Int) =
+        new(optimize, inlining, needtree, typeunion_len, type_depth, tupletype_len,
+            tuple_depth, tuple_splat, union_splitting)
 end
-const DEFAULT_PARAMS = InferenceParams(3, 7, 15, 16, 4, 4)
 
 const UNION_SPLIT_MISMATCH_ERROR = false
 
@@ -85,14 +95,10 @@ type InferenceState
     # iteration fixed-point detection
     fixedpoint::Bool
     inworkq::Bool
-    # optimization
-    optimize::Bool
-    inlining::Bool
-    needtree::Bool
+
     inferred::Bool
 
-    function InferenceState(linfo::LambdaInfo, optimize::Bool, inlining::Bool, needtree::Bool,
-                            params::InferenceParams, hooks::InferenceHooks)
+    function InferenceState(linfo::LambdaInfo, params::InferenceParams, hooks::InferenceHooks)
         @assert isa(linfo.code,Array{Any,1})
         nslots = length(linfo.slotnames)
         nl = label_counter(linfo.code)+1
@@ -178,7 +184,7 @@ type InferenceState
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), #Dict{InferenceState, Vector{LineNum}}(),
             Vector{Tuple{InferenceState, Vector{LineNum}}}(),
-            false, false, optimize, inlining, needtree, false)
+            false, false, false)
         push!(active, frame)
         nactive[] += 1
         return frame
@@ -1103,7 +1109,7 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
         return Type
     end
 
-    if sv.inlining
+    if sv.params.inlining
         # need to model the special inliner for ^
         # to ensure we have added the same edge
         if isdefined(Main, :Base) &&
@@ -1496,7 +1502,8 @@ inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
 #### entry points for inferring a LambdaInfo given a type signature ####
-function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller, params::InferenceParams=DEFAULT_PARAMS, hooks::InferenceHooks=InferenceHooks())
+function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, cached::Bool, caller,
+                      params::InferenceParams, hooks::InferenceHooks)
     local code = nothing
     local frame = nothing
     if isa(caller, LambdaInfo)
@@ -1510,14 +1517,14 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
                 # something completely new
             elseif isa(code, LambdaInfo)
                 # something existing
-                if code.inferred && !(needtree && code.code === nothing)
+                if code.inferred && !(params.needtree && code.code === nothing)
                     return (code, code.rettype, true)
                 end
             else
                 # sometimes just a return type is stored here. if a full AST
                 # is not needed, we can return it.
                 typeassert(code, Type)
-                if !needtree
+                if !params.needtree
                     return (nothing, code, true)
                 end
                 code = nothing
@@ -1596,13 +1603,13 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
         end
         # TODO: this assertion seems iffy
         assert(frame !== nothing)
-        if needtree
-            frame.needtree = true
+        if params.needtree
+            frame.params.needtree = true
         end
     else
         # inference not started yet, make a new frame for a new lambda
         linfo.inInference = true
-        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), optimize, inlining_enabled(), needtree, params, hooks)
+        frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), params, hooks)
     end
     frame = frame::InferenceState
 
@@ -1628,18 +1635,24 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
 end
 
 function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller)
-    return typeinf_edge(method, atypes, sparams, false, true, true, caller)
+    return typeinf_edge(method, atypes, sparams, true, caller,
+                        InferenceParams(needtree=false), InferenceHooks())
 end
 function typeinf(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool=false)
-    return typeinf_edge(method, atypes, sparams, needtree, true, true, nothing)
+    return typeinf_edge(method, atypes, sparams, true, nothing,
+                        InferenceParams(needtree=needtree), InferenceHooks())
 end
 # compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
 # TODO: make this use a custom cache, which we then can either keep around or throw away
-function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY; optimize::Bool=true, params=DEFAULT_PARAMS, hooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, params, hooks)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY;
+                          params::InferenceParams=InferenceParams(),
+                          hooks::InferenceHooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, false, nothing, params, hooks)
 end
-function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector, optimize::Bool, params=DEFAULT_PARAMS, hooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, true, optimize, false, nothing, params, hooks)
+function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector,
+                          params::InferenceParams=InferenceParams(),
+                          hooks::InferenceHooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, false, nothing, params, hooks)
 end
 function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
@@ -1647,7 +1660,8 @@ function typeinf_ext(linfo::LambdaInfo)
         if linfo.inferred && linfo.code !== nothing
             return linfo
         end
-        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals, true, true, true, linfo)
+        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals, true, linfo,
+                                            InferenceParams(), InferenceHooks())
         if inferred && code.inferred && linfo !== code
             # This case occurs when the IR for a function has been deleted.
             # `code` will be a newly-created LambdaInfo, and we need to copy its
@@ -1674,7 +1688,7 @@ function typeinf_ext(linfo::LambdaInfo)
         # toplevel lambda - infer directly
         linfo.inInference = true
         ccall(:jl_typeinf_begin, Void, ())
-        frame = InferenceState(linfo, true, inlining_enabled(), true, DEFAULT_PARAMS, InferenceHooks())
+        frame = InferenceState(linfo, InferenceParams(), InferenceHooks())
         typeinf_loop(frame)
         ccall(:jl_typeinf_end, Void, ())
         @assert frame.inferred # TODO: deal with this better
@@ -1961,10 +1975,10 @@ function finish(me::InferenceState)
     do_coverage = coverage_enabled()
     force_noinline = false
     # run optimization passes on fulltree
-    if me.optimize
+    if me.params.optimize
         # This pass is required for the AST to be valid in codegen
         # if any `SSAValue` is created by type inference. Ref issue #6068
-        # This (and `reindex_labels!`) needs to be run for `!me.optimize`
+        # This (and `reindex_labels!`) needs to be run for `!me.params.optimize`
         # if we start to create `SSAValue` in type inference when not
         # optimizing and use unoptimized IR in codegen.
         gotoifnot_elim_pass!(me.linfo, me)
@@ -2018,12 +2032,12 @@ function finish(me::InferenceState)
         me.linfo.inlineable = me.linfo.jlcall_api==2 || isinlineable(me.linfo)
     end
 
-    if !me.needtree
-        me.needtree = me.linfo.inlineable || ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
+    if !me.params.needtree
+        me.params.needtree = me.linfo.inlineable || ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
             me.linfo.specTypes, me.linfo.def.sig, me.linfo.def) != 0
     end
 
-    if me.needtree
+    if me.params.needtree
         if isdefined(me.linfo, :def)
             # compress code for non-toplevel thunks
             compressedtree = ccall(:jl_compress_ast, Any, (Any,Any), me.linfo, me.linfo.code)
@@ -2120,7 +2134,6 @@ function type_annotate!(linfo::LambdaInfo, states::Array{Any,1}, sv::ANY, nargs)
     body = linfo.code::Array{Any,1}
     nexpr = length(body)
     i = 1
-    optimize = sv.optimize::Bool
     while i <= nexpr
         st_i = states[i]
         expr = body[i]
@@ -2133,7 +2146,7 @@ function type_annotate!(linfo::LambdaInfo, states::Array{Any,1}, sv::ANY, nargs)
                 id = expr.args[1].id
                 record_slot_type!(id, widenconst(states[i+1][id].typ), linfo.slottypes)
             end
-        elseif optimize
+        elseif sv.params.optimize
             if ((isa(expr, Expr) && is_meta_expr(expr::Expr)) ||
                 isa(expr, LineNumberNode))
                 i += 1
@@ -2409,7 +2422,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     end
     topmod = _topmod(sv)
     # special-case inliners for known pure functions that compute types
-    if sv.inlining
+    if sv.params.inlining
         if isType(e.typ) && !has_typevars(e.typ.parameters[1],true)
             if (is(f, apply_type) || is(f, fieldtype) || is(f, typeof) ||
                 istopfunction(topmod, f, :typejoin) ||
@@ -2543,7 +2556,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
         end
         return NF
     end
-    if !sv.inlining
+    if !sv.params.inlining
         return invoke_NF()
     end
 
@@ -3033,7 +3046,7 @@ function inlining_pass(e::Expr, sv, linfo)
         end
     end
 
-    if sv.inlining
+    if sv.params.inlining
         if isdefined(Main, :Base) &&
             ((isdefined(Main.Base, :^) && is(f, Main.Base.:^)) ||
              (isdefined(Main.Base, :.^) && is(f, Main.Base.:.^))) &&
