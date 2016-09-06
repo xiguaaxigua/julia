@@ -38,13 +38,13 @@ replprint(m.lambda_template)
 
 # given a function and the argument tuple type (incl. the function type)
 # return a tuple of the replacement function and its type, or nothing
-# IDEA: define multiple hook methods, eg. `call_hook(f::child, tt)`
 function call_hook(f, tt)
     if f == child
         return hacked_child
     end
     return nothing
 end
+# alternatively, call_hook(f::typeof(child), tt) = return hacked_child
 hooks = Core.Inference.InferenceHooks(call_hook)
 
 # raise limits on inference parameters, performing a more exhaustive search
