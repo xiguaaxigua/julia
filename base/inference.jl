@@ -237,7 +237,7 @@ tupletype_tail(t::ANY, n) = Tuple{t.parameters[n:end]...}
 
 #### type-functions for builtins / intrinsics ####
 
-cmp_tfunc = (sv,x,y)->Bool
+cmp_tfunc = (params,x,y)->Bool
 
 isType(t::ANY) = isa(t,DataType) && is((t::DataType).name,Type.name)
 
@@ -253,8 +253,8 @@ function add_tfunc(f::Function, minarg::Int, maxarg::Int, tfunc::ANY)
     push!(t_ffunc_key, f)
     push!(t_ffunc_val, (minarg, maxarg, tfunc))
 end
-add_tfunc(throw, 1, 1, (sv,x)->Bottom)
-add_tfunc(box, 2, 2, (sv,t,v)->(isType(t) ? t.parameters[1] : Any))
+add_tfunc(throw, 1, 1, (params,x)->Bottom)
+add_tfunc(box, 2, 2, (params,t,v)->(isType(t) ? t.parameters[1] : Any))
 add_tfunc(eq_int, 2, 2, cmp_tfunc)
 add_tfunc(ne_int, 2, 2, cmp_tfunc)
 add_tfunc(slt_int, 2, 2, cmp_tfunc)
@@ -268,7 +268,7 @@ add_tfunc(le_float, 2, 2, cmp_tfunc)
 add_tfunc(fpiseq, 2, 2, cmp_tfunc)
 add_tfunc(fpislt, 2, 2, cmp_tfunc)
 add_tfunc(Core.Intrinsics.ccall, 3, IInf,
-    function(sv, fptr, rt, at, a...)
+    function(params, fptr, rt, at, a...)
         if !isType(rt)
             return Any
         end
@@ -283,12 +283,12 @@ add_tfunc(Core.Intrinsics.ccall, 3, IInf,
         return t
     end)
 add_tfunc(Core.Intrinsics.llvmcall, 3, IInf,
-    (sv, fptr, rt, at, a...)->(isType(rt) ? rt.parameters[1] : Any))
+    (params, fptr, rt, at, a...)->(isType(rt) ? rt.parameters[1] : Any))
 add_tfunc(Core.Intrinsics.cglobal, 1, 2,
-    (sv, fptr, t...)->(isempty(t) ? Ptr{Void} :
+    (params, fptr, t...)->(isempty(t) ? Ptr{Void} :
                    isType(t[1]) ? Ptr{t[1].parameters[1]} : Ptr))
 add_tfunc(Core.Intrinsics.select_value, 3, 3,
-    function (sv, cnd, x, y)
+    function (params, cnd, x, y)
         if isa(cnd, Const)
             if cnd.val === true
                 return x
@@ -302,7 +302,7 @@ add_tfunc(Core.Intrinsics.select_value, 3, 3,
         tmerge(x, y)
     end)
 add_tfunc(is, 2, 2,
-    function (sv, x::ANY, y::ANY)
+    function (params, x::ANY, y::ANY)
         if isa(x,Const) && isa(y,Const)
             return Const(x.val===y.val)
         elseif isType(x) && isType(y) && isleaftype(x) && isleaftype(y)
@@ -316,23 +316,23 @@ add_tfunc(is, 2, 2,
             return Bool
         end
     end)
-add_tfunc(isdefined, 1, IInf, (sv, args...)->Bool)
-add_tfunc(Core.sizeof, 1, 1, (sv,x)->Int)
-add_tfunc(nfields, 1, 1, (sv,x)->(isa(x,Const) ? Const(nfields(x.val)) :
+add_tfunc(isdefined, 1, IInf, (params, args...)->Bool)
+add_tfunc(Core.sizeof, 1, 1, (params,x)->Int)
+add_tfunc(nfields, 1, 1, (params,x)->(isa(x,Const) ? Const(nfields(x.val)) :
                                   isType(x) && isleaftype(x.parameters[1]) ? Const(nfields(x.parameters[1])) :
                                   Int))
-add_tfunc(Core._expr, 1, IInf, (sv, args...)->Expr)
-add_tfunc(applicable, 1, IInf, (sv, f, args...)->Bool)
-add_tfunc(Core.Intrinsics.arraylen, 1, 1, (sv,x)->Int)
-add_tfunc(arraysize, 2, 2, (sv,a,d)->Int)
+add_tfunc(Core._expr, 1, IInf, (params, args...)->Expr)
+add_tfunc(applicable, 1, IInf, (params, f, args...)->Bool)
+add_tfunc(Core.Intrinsics.arraylen, 1, 1, (params,x)->Int)
+add_tfunc(arraysize, 2, 2, (params,a,d)->Int)
 add_tfunc(pointerref, 3, 3,
-          function (sv,a,i,align)
+          function (params,a,i,align)
               a = widenconst(a)
               isa(a,DataType) && a<:Ptr && isa(a.parameters[1],Union{Type,TypeVar}) ? a.parameters[1] : Any
           end)
-add_tfunc(pointerset, 4, 4, (sv,a,v,i,align)->a)
+add_tfunc(pointerset, 4, 4, (params,a,v,i,align)->a)
 
-function typeof_tfunc(sv, t::ANY)
+function typeof_tfunc(params, t::ANY)
     if isa(t,Const)
         return Type{typeof(t.val)}
     elseif isType(t)
@@ -351,7 +351,7 @@ function typeof_tfunc(sv, t::ANY)
             Type{TypeVar(:_,t)}
         end
     elseif isa(t,Union)
-        Union{map(t -> typeof_tfunc(sv,t), t.types)...}
+        Union{map(t -> typeof_tfunc(params,t), t.types)...}
     elseif isa(t,TypeVar) && !(Any <: t.ub)
         Type{t}
     else
@@ -360,7 +360,7 @@ function typeof_tfunc(sv, t::ANY)
 end
 add_tfunc(typeof, 1, 1, typeof_tfunc)
 add_tfunc(typeassert, 2, 2,
-          function (sv, v, t)
+          function (params, v, t)
               if isType(t)
                   if isa(v,Const)
                       if isleaftype(t) && !isa(v.val, t.parameters[1])
@@ -373,7 +373,7 @@ add_tfunc(typeassert, 2, 2,
               return v
           end)
 add_tfunc(isa, 2, 2,
-          function (sv, v, t)
+          function (params, v, t)
               if isType(t) && isleaftype(t)
                   if v ⊑ t.parameters[1]
                       return Const(true)
@@ -384,7 +384,7 @@ add_tfunc(isa, 2, 2,
               return Bool
           end)
 add_tfunc(issubtype, 2, 2,
-          function (sv, a, b)
+          function (params, a, b)
               if isType(a) && isType(b) && isleaftype(a) && isleaftype(b)
                   return Const(issubtype(a.parameters[1], b.parameters[1]))
               end
@@ -401,26 +401,26 @@ function type_depth(t::ANY)
     return 0
 end
 
-function limit_type_depth(t::ANY, d::Int, cov::Bool, vars, sv::InferenceState)
+function limit_type_depth(t::ANY, d::Int, cov::Bool, vars, params::InferenceParams)
     if isa(t,TypeVar) || isa(t,TypeConstructor)
         return t
     end
-    inexact = !cov && d > sv.params.MAX_TYPE_DEPTH
+    inexact = !cov && d > params.MAX_TYPE_DEPTH
     if isa(t,Union)
         t === Bottom && return t
-        if d > sv.params.MAX_TYPE_DEPTH
+        if d > params.MAX_TYPE_DEPTH
             R = Any
         else
-            R = Union{map(x->limit_type_depth(x, d+1, cov, vars, sv), t.types)...}
+            R = Union{map(x->limit_type_depth(x, d+1, cov, vars, params), t.types)...}
         end
     elseif isa(t,DataType)
         P = t.parameters
         isempty(P) && return t
-        if d > sv.params.MAX_TYPE_DEPTH
+        if d > params.MAX_TYPE_DEPTH
             R = t.name.primary
         else
             stillcov = cov && (t.name === Tuple.name)
-            Q = map(x->limit_type_depth(x, d+1, stillcov, vars, sv), P)
+            Q = map(x->limit_type_depth(x, d+1, stillcov, vars, params), P)
             if !cov && _any(p->contains_is(vars,p), Q)
                 R = t.name.primary
                 inexact = true
@@ -439,7 +439,7 @@ function limit_type_depth(t::ANY, d::Int, cov::Bool, vars, sv::InferenceState)
 end
 
 # returns (type, isexact)
-function getfield_tfunc(sv::InferenceState, s0::ANY, name)
+function getfield_tfunc(params::InferenceParams, s0::ANY, name)
     if isa(s0, TypeVar)
         s0 = s0.ub
     end
@@ -459,7 +459,7 @@ function getfield_tfunc(sv::InferenceState, s0::ANY, name)
         s = typeof(s.val)
     end
     if isa(s,Union)
-        return reduce(tmerge, Bottom, map(t->getfield_tfunc(sv, t, name)[1], s.types)), false
+        return reduce(tmerge, Bottom, map(t->getfield_tfunc(params, t, name)[1], s.types)), false
     end
     if isa(s,DataType)
         if s.abstract
@@ -501,7 +501,7 @@ function getfield_tfunc(sv::InferenceState, s0::ANY, name)
                     # in the current type system
                     typ = limit_type_depth(R, 0, true,
                                            filter!(x->isa(x,TypeVar), Any[s.parameters...]),
-                                           sv)
+                                           params)
                     return typ, isleaftype(s) && isa(R, Type) && typeof(R) === typeof(typ) && typeseq(R, typ)
                 end
             end
@@ -533,20 +533,20 @@ function getfield_tfunc(sv::InferenceState, s0::ANY, name)
         else
             typ = limit_type_depth(R, 0, true,
                                    filter!(x->isa(x,TypeVar), Any[s.parameters...]),
-                                   sv)
+                                   params)
             return typ, alleq && isleaftype(s) && typeof(R) === typeof(typ) && typeseq(R, typ)
         end
     end
 end
-add_tfunc(getfield, 2, 2, (sv,s,name)->getfield_tfunc(sv,s,name)[1])
-add_tfunc(setfield!, 3, 3, (sv, o, f, v)->v)
-function fieldtype_tfunc(sv, s::ANY, name)
+add_tfunc(getfield, 2, 2, (params,s,name)->getfield_tfunc(params,s,name)[1])
+add_tfunc(setfield!, 3, 3, (params, o, f, v)->v)
+function fieldtype_tfunc(params, s::ANY, name)
     if isType(s)
         s = s.parameters[1]
     else
         return Type
     end
-    t, exact = getfield_tfunc(sv, s, name)
+    t, exact = getfield_tfunc(params, s, name)
     if is(t,Bottom)
         return t
     end
@@ -567,7 +567,7 @@ end
 has_typevars(t::ANY, all=false) = ccall(:jl_has_typevars_, Cint, (Any,Cint), t, all)!=0
 
 # TODO: handle e.g. apply_type(T, R::Union{Type{Int32},Type{Float64}})
-function apply_type_tfunc(sv::InferenceState, args...)
+function apply_type_tfunc(params::InferenceParams, args...)
     if !isType(args[1])
         return Any
     end
@@ -627,7 +627,7 @@ function apply_type_tfunc(sv::InferenceState, args...)
         uncertain = true
     end
     !uncertain && return Type{appl}
-    if type_too_complex(appl, 0, sv)
+    if type_too_complex(appl, 0, params)
         return Type{TypeVar(:_,headtype)}
     end
     !(isa(appl,TypeVar) || isvarargtype(appl)) ? Type{TypeVar(:_,appl)} : Type{appl}
@@ -645,7 +645,7 @@ function invoke_tfunc(f::ANY, types::ANY, argtype::ANY, sv::InferenceState)
     if !isleaftype(Type{types})
         return Any
     end
-    argtype = typeintersect(types,limit_tuple_type(argtype, sv))
+    argtype = typeintersect(types,limit_tuple_type(argtype, sv.params))
     if is(argtype,Bottom)
         return Bottom
     end
@@ -736,7 +736,7 @@ function builtin_tfunction(f::ANY, argtypes::Array{Any,1}, sv::InferenceState)
         # wrong # of args
         return Bottom
     end
-    return tf[3](sv, argtypes...)
+    return tf[3](sv.params, argtypes...)
 end
 
 limit_tuple_depth(params::InferenceParams, t::ANY) = limit_tuple_depth_(params,t,0)
@@ -760,9 +760,9 @@ function limit_tuple_depth_(params::InferenceParams, t::ANY, d::Int)
     Tuple{p...}
 end
 
-limit_tuple_type = (t::ANY, sv::InferenceState) -> limit_tuple_type_n(t, sv.params.MAX_TUPLETYPE_LEN, sv)
+limit_tuple_type = (t::ANY, params::InferenceParams) -> limit_tuple_type_n(t, params.MAX_TUPLETYPE_LEN)
 
-function limit_tuple_type_n(t::ANY, lim::Int, sv::InferenceState)
+function limit_tuple_type_n(t::ANY, lim::Int)
     p = t.parameters
     n = length(p)
     if n > lim
@@ -784,7 +784,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
     # It is important for N to be >= the number of methods in the error()
     # function, so we can still know that error() is always Bottom.
     # here I picked 4.
-    argtype = limit_tuple_type(argtype, sv)
+    argtype = limit_tuple_type(argtype, sv.params)
     argtypes = argtype.parameters
     applicable = _methods_by_ftype(argtype, 4)
     rettype = Bottom
@@ -838,7 +838,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                     if mightlimitdepth && td > type_depth(infstate.linfo.specTypes)
                         # impose limit if we recur and the argument types grow beyond MAX_TYPE_DEPTH
                         if td > sv.params.MAX_TYPE_DEPTH
-                            sig = limit_type_depth(sig, 0, true, [], sv)
+                            sig = limit_type_depth(sig, 0, true, [], sv.params)
                             recomputesvec = true
                             break
                         else
@@ -855,7 +855,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                                         newsig[i] = p1[i].name.primary
                                         limitdepth  = true
                                     else
-                                        newsig[i] = limit_type_depth(p1[i], 1, true, [], sv)
+                                        newsig[i] = limit_type_depth(p1[i], 1, true, [], sv.params)
                                     end
                                 end
                                 if limitdepth
@@ -873,7 +873,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
 #        # limit argument type size growth
 #        tdepth = type_depth(sig)
 #        if tdepth > sv.params.MAX_TYPE_DEPTH
-#            sig = limit_type_depth(sig, 0, true, [], sv)
+#            sig = limit_type_depth(sig, 0, true, [], sv.params)
 #        end
 
         # limit length based on size of definition signature.
@@ -893,7 +893,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                     end
                 end
                 if !allsame
-                    sig = limit_tuple_type_n(sig, lsig + 1, sv)
+                    sig = limit_tuple_type_n(sig, lsig + 1, sv.params)
                     recomputesvec = true
                 end
             end
@@ -1090,12 +1090,12 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
             # allow tuple indexing functions to take advantage of constant
             # index arguments.
             if istopfunction(tm, f, :getindex)
-                return getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
+                return getfield_tfunc(sv.params, argtypes[2], argtypes[3])[1]
             elseif istopfunction(tm, f, :next)
-                t1 = getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
+                t1 = getfield_tfunc(sv.params, argtypes[2], argtypes[3])[1]
                 return t1===Bottom ? Bottom : Tuple{t1, Int}
             elseif istopfunction(tm, f, :indexed_next)
-                t1 = getfield_tfunc(sv, argtypes[2], argtypes[3])[1]
+                t1 = getfield_tfunc(sv.params, argtypes[2], argtypes[3])[1]
                 return t1===Bottom ? Bottom : Tuple{t1, Int}
             end
         end
@@ -1290,8 +1290,8 @@ function abstract_interpret(e::ANY, vtypes::VarTable, sv::InferenceState)
     return vtypes
 end
 
-function type_too_complex(t::ANY, d, sv::InferenceState)
-    if d > sv.params.MAX_TYPE_DEPTH
+function type_too_complex(t::ANY, d, params::InferenceParams)
+    if d > params.MAX_TYPE_DEPTH
         return true
     end
     if isa(t,Union)
@@ -1299,12 +1299,12 @@ function type_too_complex(t::ANY, d, sv::InferenceState)
     elseif isa(t,DataType)
         p = t.parameters
     elseif isa(t,TypeVar)
-        return type_too_complex(t.lb, d+1, sv) || type_too_complex(t.ub, d+1, sv)
+        return type_too_complex(t.lb, d+1, params) || type_too_complex(t.ub, d+1, params)
     else
         return false
     end
     for x in (p::SimpleVector)
-        if type_too_complex(x, d+1, sv)
+        if type_too_complex(x, d+1, params)
             return true
         end
     end
@@ -1362,7 +1362,7 @@ function tmerge(typea::ANY, typeb::ANY)
         end
     end
     u = Union{typea, typeb}
-    if length(u.types) > global_sv.params.MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv)
+    if length(u.types) > global_sv.params.MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv.params)
         # don't let type unions get too big
         # TODO: something smarter, like a common supertype
         return Any
@@ -2561,7 +2561,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     end
 
     if length(atype_unlimited.parameters) - 1 > sv.params.MAX_TUPLETYPE_LEN
-        atype = limit_tuple_type(atype_unlimited, sv)
+        atype = limit_tuple_type(atype_unlimited, sv.params)
     else
         atype = atype_unlimited
     end

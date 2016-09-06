@@ -568,7 +568,8 @@ function code_typed(f::ANY, types::ANY=Tuple; optimize=true)
         if optimize
             (li, ty, inf) = Core.Inference.typeinf(linfo, x[1], x[2], true)
         else
-            (li, ty, inf) = Core.Inference.typeinf_uncached(linfo, x[1], x[2], optimize=false)
+            (li, ty, inf) = Core.Inference.typeinf_uncached(linfo, x[1], x[2],
+                                Core.Inference.InferenceParams(optimize=false))
         end
         inf || error("inference not successful") # Inference disabled
         push!(asts, li)
