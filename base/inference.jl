@@ -997,6 +997,7 @@ function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv)
     end
 
     if f === return_type && length(argtypes) == 3
+        # TODO: potentially not correct if tmerge->return_type depends on InferenceParams
         tt = argtypes[3]
         if isType(tt)
             af_argtype = tt.parameters[1]
