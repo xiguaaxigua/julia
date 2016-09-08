@@ -70,6 +70,7 @@ mod = LLVM.Module("my_module")
 
 # irgen
 # TODO
+exit()
 fun = get(functions(mod), "parent")
 
 # execution

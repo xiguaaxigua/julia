@@ -299,7 +299,7 @@ add_tfunc(Core.Intrinsics.select_value, 3, 3,
             end
         end
         (Bool ⊑ cnd) || return Bottom
-        tmerge(x, y)
+        tmerge(x, y, params)
     end)
 add_tfunc(is, 2, 2,
     function (params, x::ANY, y::ANY)
@@ -459,7 +459,8 @@ function getfield_tfunc(params::InferenceParams, s0::ANY, name)
         s = typeof(s.val)
     end
     if isa(s,Union)
-        return reduce(tmerge, Bottom, map(t->getfield_tfunc(params, t, name)[1], s.types)), false
+        return reduce((a,b)->tmerge(a,b,params), Bottom,
+                      map(t->getfield_tfunc(params, t, name)[1], s.types)), false
     end
     if isa(s,DataType)
         if s.abstract
@@ -525,7 +526,8 @@ function getfield_tfunc(params::InferenceParams, s0::ANY, name)
     elseif length(s.types) == 1 && isempty(s.parameters)
         return s.types[1], true
     else
-        R = reduce(tmerge, Bottom, map(unwrapva, s.types)) #=Union{s.types...}=#
+        R = reduce((a,b)->tmerge(a,b,params), Bottom,
+                   map(unwrapva, s.types)) #=Union{s.types...}=#
         alleq = isa(R, Type) && typeof(R) === typeof(s.types[1]) && typeseq(R, s.types[1])
         # do the same limiting as the known-symbol case to preserve type-monotonicity
         if isempty(s.parameters)
@@ -910,7 +912,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
             sparams = recomputed[2]::SimpleVector
         end
         (_tree, rt) = typeinf_edge(method, sig, sparams, sv)
-        rettype = tmerge(rettype, rt)
+        rettype = tmerge(rettype, rt, sv.params)
         if is(rettype,Any)
             break
         end
@@ -980,7 +982,8 @@ function abstract_apply(af::ANY, fargs, aargtypes::Vector{Any}, vtypes::VarTable
         at = append_any(Any[type_typeof(af)], ctypes...)
         n = length(at)
         if n-1 > sv.params.MAX_TUPLETYPE_LEN
-            tail = foldl((a,b)->tmerge(a,unwrapva(b)), Bottom, at[sv.params.MAX_TUPLETYPE_LEN+1:n])
+            tail = foldl((a,b)->tmerge(a,unwrapva(b),sv.params), Bottom,
+                         at[sv.params.MAX_TUPLETYPE_LEN+1:n])
             at = vcat(at[1:sv.params.MAX_TUPLETYPE_LEN], Any[Vararg{tail}])
         end
         return abstract_call(af, (), at, vtypes, sv)
@@ -997,7 +1000,7 @@ function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv)
     end
 
     if f === return_type && length(argtypes) == 3
-        # TODO: potentially not correct if tmerge->return_type depends on InferenceParams
+        # NOTE: only considering calls to return_type without InferenceParams arg
         tt = argtypes[3]
         if isType(tt)
             af_argtype = tt.parameters[1]
@@ -1343,7 +1346,7 @@ is_meta_expr_head(head::Symbol) =
      head === :line)
 is_meta_expr(ex::Expr) = is_meta_expr_head(ex.head)
 
-function tmerge(typea::ANY, typeb::ANY)
+function tmerge(typea::ANY, typeb::ANY, params::InferenceParams)
     typea ⊑ typeb && return typeb
     typeb ⊑ typea && return typea
     typea, typeb = widenconst(typea), widenconst(typeb)
@@ -1363,7 +1366,7 @@ function tmerge(typea::ANY, typeb::ANY)
         end
     end
     u = Union{typea, typeb}
-    if length(u.types) > global_sv.params.MAX_TYPEUNION_LEN || type_too_complex(u, 0, global_sv.params)
+    if length(u.types) > params.MAX_TYPEUNION_LEN || type_too_complex(u, 0, params)
         # don't let type unions get too big
         # TODO: something smarter, like a common supertype
         return Any
@@ -1371,18 +1374,18 @@ function tmerge(typea::ANY, typeb::ANY)
     return u
 end
 
-function smerge(sa::Union{NotFound,VarState}, sb::Union{NotFound,VarState})
+function smerge(sa::Union{NotFound,VarState}, sb::Union{NotFound,VarState}, params::InferenceParams)
     sa === NF && return sb
     sb === NF && return sa
     issubstate(sa,sb) && return sb
     issubstate(sb,sa) && return sa
-    VarState(tmerge(sa.typ, sb.typ), sa.undef | sb.undef)
+    VarState(tmerge(sa.typ, sb.typ, params), sa.undef | sb.undef)
 end
 
 tchanged(n::ANY, o::ANY) = is(o,NF) || (!is(n,NF) && !(n ⊑ o))
 schanged(n::ANY, o::ANY) = is(o,NF) || (!is(n,NF) && !issubstate(n, o))
 
-function stupdate!(state::Tuple{}, changes::StateUpdate)
+function stupdate!(state::Tuple{}, changes::StateUpdate, ::InferenceParams)
     newst = copy(changes.state)
     if isa(changes.var, Slot)
         newst[changes.var.id] = changes.vtype
@@ -1390,7 +1393,7 @@ function stupdate!(state::Tuple{}, changes::StateUpdate)
     newst
 end
 
-function stupdate!(state::VarTable, change::StateUpdate)
+function stupdate!(state::VarTable, change::StateUpdate, params::InferenceParams)
     for i = 1:length(state)
         if isa(change.var,Slot) && i == change.var.id
             newtype = change.vtype
@@ -1399,28 +1402,28 @@ function stupdate!(state::VarTable, change::StateUpdate)
         end
         oldtype = state[i]
         if schanged(newtype, oldtype)
-            state[i] = smerge(oldtype, newtype)
+            state[i] = smerge(oldtype, newtype, params)
         end
     end
     return state
 end
 
-function stupdate!(state::VarTable, changes::VarTable)
+function stupdate!(state::VarTable, changes::VarTable, params::InferenceParams)
     newstate = false
     for i = 1:length(state)
         newtype = changes[i]
         oldtype = state[i]
         if schanged(newtype, oldtype)
             newstate = state
-            state[i] = smerge(oldtype, newtype)
+            state[i] = smerge(oldtype, newtype, params)
         end
     end
     return newstate
 end
 
-stupdate!(state::Tuple{}, changes::VarTable) = copy(changes)
+stupdate!(state::Tuple{}, changes::VarTable, ::InferenceParams) = copy(changes)
 
-stupdate!(state::Tuple{}, changes::Tuple{}) = false
+stupdate!(state::Tuple{}, changes::Tuple{}, ::InferenceParams) = false
 
 #### helper functions for typeinf initialization and looping ####
 
@@ -1782,7 +1785,7 @@ function typeinf_frame(frame)
             if frame.cur_hand !== ()
                 # propagate type info to exception handler
                 l = frame.cur_hand[1]
-                newstate = stupdate!(s[l], changes)
+                newstate = stupdate!(s[l], changes, frame.params)
                 if newstate !== false
                     push!(W, l)
                     s[l] = newstate
@@ -1796,7 +1799,7 @@ function typeinf_frame(frame)
                 new = changes.vtype.typ
                 old = frame.linfo.ssavaluetypes[id]
                 if old===NF || !(new ⊑ old)
-                    frame.linfo.ssavaluetypes[id] = tmerge(old, new)
+                    frame.linfo.ssavaluetypes[id] = tmerge(old, new, frame.params)
                     for r in frame.ssavalue_uses[id]
                         if !is(s[r], ()) # s[r] === () => unreached statement
                             push!(W, r)
@@ -1819,7 +1822,7 @@ function typeinf_frame(frame)
                     else
                         # general case
                         frame.handler_at[l] = frame.cur_hand
-                        newstate = stupdate!(s[l], changes)
+                        newstate = stupdate!(s[l], changes, frame.params)
                         if newstate !== false
                             # add else branch to active IP list
                             push!(W, l)
@@ -1831,7 +1834,7 @@ function typeinf_frame(frame)
                     rt = abstract_eval(stmt.args[1], s[pc], frame)
                     if tchanged(rt, frame.bestguess)
                         # new (wider) return type for frame
-                        frame.bestguess = tmerge(frame.bestguess, rt)
+                        frame.bestguess = tmerge(frame.bestguess, rt, frame.params)
                         for (caller, callerW) in frame.backedges
                             # notify backedges of updated type information
                             for caller_pc in callerW
@@ -1849,7 +1852,7 @@ function typeinf_frame(frame)
                     l = frame.cur_hand[1]
                     old = s[l]
                     new = s[pc]::Array{Any,1}
-                    newstate = stupdate!(old, new)
+                    newstate = stupdate!(old, new, frame.params)
                     if newstate !== false
                         push!(W, l)
                         s[l] = newstate
@@ -1873,7 +1876,7 @@ function typeinf_frame(frame)
             end
             pc´ > n && break # can't proceed with the fast-path fall-through
             frame.handler_at[pc´] = frame.cur_hand
-            newstate = stupdate!(s[pc´], changes)
+            newstate = stupdate!(s[pc´], changes, frame.params)
             if newstate !== false
                 s[pc´] = newstate
                 pc = pc´
@@ -3927,12 +3930,14 @@ function reindex_labels!(linfo::LambdaInfo, sv::InferenceState)
     end
 end
 
-function return_type(f::ANY, t::ANY)
+function return_type(f::ANY, t::ANY, params::InferenceParams=InferenceParams())
+    # TODO: is this correct? when is return_type actually executed, ie. not pure_eval_call'd?
+    #       also, should pass params to typeinf
     rt = Union{}
     for m in _methods(f, t, -1)
         _, ty, inferred = typeinf(m[3], m[1], m[2], false)
         !inferred && return Any
-        rt = tmerge(rt, ty)
+        rt = tmerge(rt, ty, params)
         rt === Any && break
     end
     return rt
