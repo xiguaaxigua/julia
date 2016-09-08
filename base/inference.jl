@@ -17,6 +17,8 @@ type InferenceParams
     MAX_TUPLE_SPLAT::Int
     MAX_UNION_SPLITTING::Int
 
+    # default values will be used for regular compilation, as the compiler calls typeinf_ext
+    # without specifying, or allowing to override, the inference parameters
     InferenceParams(;optimize::Bool=true, inlining::Bool=inlining_enabled(), needtree::Bool=true,
                     typeunion_len=3::Int, type_depth=7::Int, tupletype_len=15::Int,
                     tuple_depth=16::Int, tuple_splat=4::Int, union_splitting=4::Int) =
@@ -1642,9 +1644,9 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
     return typeinf_edge(method, atypes, sparams, true, caller,
                         InferenceParams(needtree=false), InferenceHooks())
 end
-function typeinf(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool=false)
-    return typeinf_edge(method, atypes, sparams, true, nothing,
-                        InferenceParams(needtree=needtree), InferenceHooks())
+function typeinf(method::Method, atypes::ANY, sparams::SimpleVector,
+                 params::InferenceParams=InferenceParams())
+    return typeinf_edge(method, atypes, sparams, true, nothing, params, InferenceHooks())
 end
 # compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
 # TODO: make this use a custom cache, which we then can either keep around or throw away
@@ -2619,7 +2621,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
         isa(si, TypeVar) && return NF
     end
 
-    (linfo, ty, inferred) = typeinf(method, metharg, methsp, false)
+    (linfo, ty, inferred) = typeinf(method, metharg, methsp, InferenceParams(needtree=false))
     if linfo === nothing || !inferred
         return invoke_NF()
     end
@@ -2629,7 +2631,7 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     elseif linfo !== nothing && !linfo.inlineable
         return invoke_NF()
     elseif linfo === nothing || linfo.code === nothing
-        (linfo, ty, inferred) = typeinf(method, metharg, methsp, true)
+        (linfo, ty, inferred) = typeinf(method, metharg, methsp)
     end
     if linfo === nothing || !inferred || !linfo.inlineable || (ast = linfo.code) === nothing
         return invoke_NF()
@@ -3931,11 +3933,12 @@ function reindex_labels!(linfo::LambdaInfo, sv::InferenceState)
 end
 
 function return_type(f::ANY, t::ANY, params::InferenceParams=InferenceParams())
-    # TODO: is this correct? when is return_type actually executed, ie. not pure_eval_call'd?
-    #       also, should pass params to typeinf
+    # TODO: are all local calls to return_type processed by pure_eval_call?
+    #       if not, this behavior isn't correct, as it uses the default params
+    #       for a call which might have been inferred with a different set of params
     rt = Union{}
     for m in _methods(f, t, -1)
-        _, ty, inferred = typeinf(m[3], m[1], m[2], false)
+        _, ty, inferred = typeinf(m[3], m[1], m[2], InferenceParams(needtree=false))
         !inferred && return Any
         rt = tmerge(rt, ty, params)
         rt === Any && break
@@ -3949,8 +3952,8 @@ end
 # this ensures that typeinf_ext doesn't recurse before it can add the item to the workq
 
 for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10)
-    typeinf(m[3], m[1], m[2], true)
+    typeinf(m[3], m[1], m[2])
 end
 for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10)
-    typeinf(m[3], m[1], m[2], true)
+    typeinf(m[3], m[1], m[2])
 end
