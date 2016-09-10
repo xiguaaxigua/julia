@@ -11,14 +11,14 @@ ifeq ($(JULIA_PKGDIR),)
 endif
 
 # X.Y.Z or X.Y.Z-hash
-DMG_VERSION_SUFFIX:=$(shell [ $$(git describe --tags --exact-match 2>/dev/null) ] && echo $(JULIA_VERSION) || echo $(JULIA_VERSION)-$(JULIA_COMMIT))
+VOL_VERSION_SUFFIX:=$(shell [ $$(git describe --tags --exact-match 2>/dev/null) ] && echo $(JULIA_VERSION) || echo $(JULIA_VERSION)-$(JULIA_COMMIT))
 
 # X.Y
 APP_VERSION_SUFFIX:=$(shell echo $(JULIA_VERSION) | grep -o '^[0-9]\+.[0-9]\+')
 
-DMG_NAME:=Julia-$(DMG_VERSION_SUFFIX).dmg
+DMG_NAME:=Julia-$(JULIA_BINARYDIST_FILENAME).dmg
 APP_NAME:=Julia-$(APP_VERSION_SUFFIX).app
-VOL_NAME:=Julia-$(DMG_VERSION_SUFFIX)
+VOL_NAME:=Julia-$(VOL_VERSION_SUFFIX)
 
 all: clean $(DMG_NAME)
 
