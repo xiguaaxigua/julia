@@ -72,7 +72,6 @@ type InferenceState
     # whereas backedges is optimized for iteration
     edges::ObjectIdDict # a Dict{InferenceState, Vector{LineNum}}
     backedges::Vector{Tuple{InferenceState, Vector{LineNum}}}
-    li_edges::Vector{Any} # a Set{MethodInstance}
     # iteration fixed-point detection
     fixedpoint::Bool
     inworkq::Bool
@@ -167,8 +166,8 @@ type InferenceState
         end
 
         if cached && !toplevel
-            min_valid = min_age(linfo)
-            max_valid = max_age(linfo)
+            min_valid = min_age(linfo.def)
+            max_valid = max_age(linfo.def)
         else
             min_valid = UInt(0)
             max_valid = UInt(0)
@@ -181,7 +180,6 @@ type InferenceState
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), # Dict{InferenceState, Vector{LineNum}}(),
             Vector{Tuple{InferenceState, Vector{LineNum}}}(),
-            Vector{Any}(), # Set{MethodInstance}()
             false, false, optimize, inlining, cached, false)
         push!(active, frame)
         nactive[] += 1
@@ -209,26 +207,6 @@ function get_staged(li::MethodInstance)
         src.code = ccall(:jl_uncompress_ast, Any, (Any, Any), li.def, src.code)
     end
     return src
-end
-
-# TODO: track the worlds for which this InferenceState
-# is being used, and split it if the WIP requires it
-function update_valid_ages!(sv::InferenceState)
-    if isdefined(sv.linfo, :backedges)
-        min_valid = sv.min_valid
-        max_valid = sv.max_valid
-        for li in sv.li_edges
-            li = li::MethodInstance
-            min_valid = max(min_valid, min_age(li))
-            max_valid = min(max_valid, max_age(li))
-        end
-        sv.min_valid = min_valid
-        sv.max_valid = max_valid
-    end
-end
-function update_valid_age!(li::MethodInstance, sv::InferenceState)
-    sv.min_valid = max(sv.min_valid, min_age(li))
-    sv.max_valid = min(sv.max_valid, max_age(li))
 end
 
 
@@ -1543,15 +1521,45 @@ end
 inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
+# TODO: track the worlds for which this InferenceState
+# is being used, and split it if the WIP requires it?
+function converge_valid_age!(sv::InferenceState)
+    # push the validity range of sv into its fixedpoint callers
+    # recursing as needed to cover the graph
+    for (i, _) in sv.backedges
+        if i.fixedpoint
+            updated = false
+            if i.min_valid < sv.min_valid
+                i.min_valid = sv.min_valid
+                updated = true
+            end
+            if i.max_valid > sv.max_valid
+                i.max_valid = sv.max_valid
+                updated = true
+            end
+            if updated
+                converge_valid_age!(i)
+            end
+        end
+    end
+    nothing
+end
+function update_valid_age!(edge::InferenceState, sv::InferenceState)
+    sv.min_valid = max(edge.min_valid, sv.min_valid)
+    sv.max_valid = min(edge.max_valid, sv.max_valid)
+    nothing
+end
+function update_valid_age!(li::MethodInstance, sv::InferenceState)
+    sv.min_valid = max(sv.min_valid, min_age(li))
+    sv.max_valid = min(sv.max_valid, max_age(li))
+    nothing
+end
 function add_backedge(li::MethodInstance, sv::InferenceState)
     caller = sv.linfo
     isdefined(caller, :def) || return # don't add backedges to toplevel exprs
     isdefined(li, :backedges) || (li.backedges = []) # lazy-init the backedges array
     in(caller, li.backedges) || push!(li.backedges, caller) # add a backedge from callee to caller
     update_valid_age!(li, sv)
-    if li.inInference
-        in(li, sv.li_edges) || push!(sv.li_edges, li) # add a forward edge from caller to callee
-    end
     nothing
 end
 function add_mt_backedge(mt::MethodTable, sv::InferenceState)
@@ -1610,7 +1618,7 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, worl
         # TODO: this assertion seems iffy
         assert(frame !== nothing)
     else
-        # TODO: verify again here that linfo wasn't just inferred
+        # XXX: the following logic needs to repeat the test for linfo.inferred now that it hold the lock
         # inference not started yet, make a new frame for a new lambda
         if linfo.def.isstaged
             try
@@ -1630,6 +1638,7 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, worl
     if isa(caller, InferenceState)
         # if we were called from inside inference, the caller will be the InferenceState object
         # for which the edge was required
+        update_valid_age!(frame, caller)
         if haskey(caller.edges, frame)
             Ws = caller.edges[frame]::Vector{Int}
             if !(caller.currpc in Ws)
@@ -1793,8 +1802,12 @@ function typeinf_loop(frame)
                         i.inworkq = true
                     end
                 end
+                for i in fplist
+                    # push valid ages from each node across the graph
+                    converge_valid_age!(i::InferenceState)
+                end
                 for i in length(fplist):-1:1
-                    finish(fplist[i]) # this may add incomplete work to active
+                    finish(fplist[i]::InferenceState) # this may add incomplete work to active
                 end
             end
         end
@@ -1961,8 +1974,8 @@ function typeinf_frame(frame)
         else # fixedpoint propagation
             for (i, _) in frame.edges
                 i = i::InferenceState
-                update_valid_ages!(i) # converge age at the same time
                 if !i.fixedpoint
+                    update_valid_age!(i, frame) # work towards converging age at the same time
                     if !i.inworkq
                         push!(workq, i)
                         i.inworkq = true
@@ -1983,7 +1996,7 @@ function unmark_fixedpoint(frame::InferenceState)
     # based upon (recursively) assuming that frame was stuck
     if frame.fixedpoint
         frame.fixedpoint = false
-        for (i,_) in frame.backedges
+        for (i, _) in frame.backedges
             unmark_fixedpoint(i)
         end
     end
@@ -2017,8 +2030,9 @@ end
 # inference completed on `me`
 # update the MethodInstance and notify the edges
 function finish(me::InferenceState)
-    for (i,_) in me.edges
-        @assert (i::InferenceState).fixedpoint
+    for (i, _) in me.edges
+        i = i::InferenceState
+        @assert i.fixedpoint
     end
     # below may call back into inference and
     # see this InferenceState is in an incomplete state
@@ -2107,7 +2121,6 @@ function finish(me::InferenceState)
                     inferred.code = ccall(:jl_compress_ast, Any, (Any, Any), me.linfo.def, inferred.code)
                 end
             end
-            update_valid_ages!(me)
             ccall(:jl_specialization_set_world, Void, (Any, UInt, UInt),
                   me.linfo, me.min_valid, me.max_valid)
         end
@@ -2115,25 +2128,26 @@ function finish(me::InferenceState)
         ccall(:jl_set_lambda_rettype, Void, (Any, Any, Any, Any), me.linfo, widenconst(me.bestguess), const_api, inferred)
     end
 
-    me.src.inferred = true
-    me.linfo.inInference = false
-    # finalize and record the linfo result
-    me.inferred = true
-
     # lazy-delete the item from active for several reasons:
     # efficiency, correctness, and recursion-safety
     nactive[] -= 1
     active[findlast(active, me)] = nothing
 
     # update all of the callers by traversing the backedges
-    for (i,_) in me.backedges
+    for (i, _) in me.backedges
         if !me.fixedpoint || !i.fixedpoint
             # wake up each backedge, unless both me and it already reached a fixed-point (cycle resolution stage)
             delete!(i.edges, me)
             i.inworkq || push!(workq, i)
             i.inworkq = true
         end
+        add_backedge(me.linfo, i) # add the real backedge now
     end
+
+    # finalize and record the linfo result
+    me.src.inferred = true
+    me.linfo.inInference = false
+    me.inferred = true
     nothing
 end
 
