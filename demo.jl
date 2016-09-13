@@ -51,10 +51,10 @@ end
 hooks = Core.Inference.InferenceHooks(call_hook)
 
 # raise limits on inference parameters, performing a more exhaustive search
-params = Core.Inference.InferenceParams(type_depth=64)
+params = Core.Inference.InferenceParams(type_depth=64, cached=false)
 
 (linfo, rettyp, inferred) =
-    Core.Inference.typeinf_uncached(m, sig, spvals, params=params, hooks=hooks)
+    Core.Inference.typeinf(m, sig, spvals, params, hooks)
 inferred || error("inference not successful")
 println("Returns: $rettyp")
 replprint(linfo)

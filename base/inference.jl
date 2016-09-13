@@ -7,6 +7,7 @@ type InferenceParams
     optimize::Bool
     inlining::Bool
     needtree::Bool  # assigned to, hence not immutable
+    cached::Bool
 
     # parameters limiting potentially-infinite types
     MAX_TYPEUNION_LEN::Int
@@ -19,11 +20,24 @@ type InferenceParams
 
     # default values will be used for regular compilation, as the compiler calls typeinf_ext
     # without specifying, or allowing to override, the inference parameters
-    InferenceParams(;optimize::Bool=true, inlining::Bool=inlining_enabled(), needtree::Bool=true,
+    InferenceParams(;optimize::Bool=true, inlining::Bool=inlining_enabled(),
+                    needtree::Bool=true, cached::Bool=true,
                     typeunion_len=3::Int, type_depth=7::Int, tupletype_len=15::Int,
                     tuple_depth=16::Int, tuple_splat=4::Int, union_splitting=4::Int) =
-        new(optimize, inlining, needtree, typeunion_len, type_depth, tupletype_len,
+        new(optimize, inlining, needtree, cached, typeunion_len, type_depth, tupletype_len,
             tuple_depth, tuple_splat, union_splitting)
+
+    # copy constructor for selectively overriding certain params
+    InferenceParams(params::InferenceParams; kwargs...) =
+        InferenceParams(;optimize=params.optimize, inlining=params.inlining,
+                        needtree=params.needtree, cached=params.cached,
+                        typeunion_len=params.MAX_TYPEUNION_LEN,
+                        type_depth=params.MAX_TYPE_DEPTH,
+                        tupletype_len=params.MAX_TUPLETYPE_LEN,
+                        tuple_depth=params.MAX_TUPLE_DEPTH,
+                        tuple_splat=params.MAX_TUPLE_SPLAT,
+                        union_splitting=params.MAX_UNION_SPLITTING,
+                        kwargs...)
 end
 
 const UNION_SPLIT_MISMATCH_ERROR = false
@@ -663,7 +677,8 @@ function invoke_tfunc(f::ANY, types::ANY, argtype::ANY, sv::InferenceState)
     meth = entry.func
     (ti, env) = ccall(:jl_match_method, Any, (Any, Any, Any),
                       argtype, meth.sig, meth.tvars)::SimpleVector
-    return typeinf_edge(meth::Method, ti, env, sv)[2]
+    return typeinf_edge(meth::Method, ti, env, sv,
+                        InferenceParams(sv.params; needtree=false))[2]
 end
 
 function tuple_tfunc(argtype::ANY)
@@ -897,7 +912,7 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
                     end
                 end
                 if !allsame
-                    sig = limit_tuple_type_n(sig, lsig + 1, sv.params)
+                    sig = limit_tuple_type_n(sig, lsig + 1)
                     recomputesvec = true
                 end
             end
@@ -913,7 +928,9 @@ function abstract_call_gf_by_type(f::ANY, argtype::ANY, sv::InferenceState)
             sig = recomputed[1]::DataType
             sparams = recomputed[2]::SimpleVector
         end
-        (_tree, rt) = typeinf_edge(method, sig, sparams, sv)
+        # XXX: passing cached=true here; preserving sv.params.cached makes inference hang
+        (_tree, rt) = typeinf_edge(method, sig, sparams, sv,
+                                   InferenceParams(sv.params; cached=true, needtree=false))
         rettype = tmerge(rettype, rt, sv.params)
         if is(rettype,Any)
             break
@@ -1481,8 +1498,9 @@ function newvar!(sv::InferenceState, typ)
 end
 
 # create a specialized LambdaInfo from a method
-function specialize_method(method::Method, types::ANY, sp::SimpleVector, cached)
-    if cached
+function specialize_method(method::Method, types::ANY, sp::SimpleVector,
+                           params::InferenceParams)
+    if params.cached
         return ccall(:jl_specializations_get_linfo, Ref{LambdaInfo}, (Any, Any, Any, Cint), method, types, sp, true)
     else
         return ccall(:jl_get_specialized, Ref{LambdaInfo}, (Any, Any, Any), method, types, sp)
@@ -1508,13 +1526,14 @@ inlining_enabled() = (JLOptions().can_inline == 1)
 coverage_enabled() = (JLOptions().code_coverage != 0)
 
 #### entry points for inferring a LambdaInfo given a type signature ####
-function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, cached::Bool, caller,
-                      params::InferenceParams, hooks::InferenceHooks)
+function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller,
+                      params::InferenceParams=InferenceParams(),
+                      hooks::InferenceHooks=InferenceHooks())
     local code = nothing
     local frame = nothing
     if isa(caller, LambdaInfo)
         code = caller
-    elseif cached
+    elseif params.cached
         # check cached specializations
         # for an existing result stored there
         if !is(method.specializations, nothing)
@@ -1585,12 +1604,12 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, cached
         end
         try
             # user code might throw errors – ignore them
-            linfo = specialize_method(method, atypes, sparams, cached)
+            linfo = specialize_method(method, atypes, sparams, params)
         catch
             return (nothing, Any, false)
         end
     else
-        linfo = specialize_method(method, atypes, sparams, cached)
+        linfo = specialize_method(method, atypes, sparams, params)
     end
 
     ccall(:jl_typeinf_begin, Void, ())
@@ -1640,25 +1659,10 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, cached
     return (frame.linfo, widenconst(frame.bestguess), frame.inferred)
 end
 
-function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller)
-    return typeinf_edge(method, atypes, sparams, true, caller,
-                        InferenceParams(needtree=false), InferenceHooks())
-end
 function typeinf(method::Method, atypes::ANY, sparams::SimpleVector,
-                 params::InferenceParams=InferenceParams())
-    return typeinf_edge(method, atypes, sparams, true, nothing, params, InferenceHooks())
-end
-# compute an inferred (optionally optimized) AST without global effects (i.e. updating the cache)
-# TODO: make this use a custom cache, which we then can either keep around or throw away
-function typeinf_uncached(method::Method, atypes::ANY, sparams::ANY;
-                          params::InferenceParams=InferenceParams(),
-                          hooks::InferenceHooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, false, nothing, params, hooks)
-end
-function typeinf_uncached(method::Method, atypes::ANY, sparams::SimpleVector,
-                          params::InferenceParams=InferenceParams(),
-                          hooks::InferenceHooks=InferenceHooks())
-    return typeinf_edge(method, atypes, sparams, false, nothing, params, hooks)
+                 params::InferenceParams=InferenceParams(),
+                 hooks::InferenceHooks=InferenceHooks())
+    return typeinf_edge(method, atypes, sparams, nothing, params, hooks)
 end
 function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
@@ -1666,8 +1670,8 @@ function typeinf_ext(linfo::LambdaInfo)
         if linfo.inferred && linfo.code !== nothing
             return linfo
         end
-        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals, true, linfo,
-                                            InferenceParams(), InferenceHooks())
+        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals,
+                                            linfo, InferenceParams(), InferenceHooks())
         if inferred && code.inferred && linfo !== code
             # This case occurs when the IR for a function has been deleted.
             # `code` will be a newly-created LambdaInfo, and we need to copy its
@@ -2621,7 +2625,8 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
         isa(si, TypeVar) && return NF
     end
 
-    (linfo, ty, inferred) = typeinf(method, metharg, methsp, InferenceParams(needtree=false))
+    (linfo, ty, inferred) =
+        typeinf(method, metharg, methsp, InferenceParams(sv.params; needtree=false))
     if linfo === nothing || !inferred
         return invoke_NF()
     end
@@ -2631,7 +2636,8 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     elseif linfo !== nothing && !linfo.inlineable
         return invoke_NF()
     elseif linfo === nothing || linfo.code === nothing
-        (linfo, ty, inferred) = typeinf(method, metharg, methsp)
+        (linfo, ty, inferred) =
+            typeinf(method, metharg, methsp, InferenceParams(sv.params; needtree=true))
     end
     if linfo === nothing || !inferred || !linfo.inlineable || (ast = linfo.code) === nothing
         return invoke_NF()
@@ -3938,7 +3944,7 @@ function return_type(f::ANY, t::ANY, params::InferenceParams=InferenceParams())
     #       for a call which might have been inferred with a different set of params
     rt = Union{}
     for m in _methods(f, t, -1)
-        _, ty, inferred = typeinf(m[3], m[1], m[2], InferenceParams(needtree=false))
+        _, ty, inferred = typeinf(m[3], m[1], m[2], InferenceParams(params; needtree=false))
         !inferred && return Any
         rt = tmerge(rt, ty, params)
         rt === Any && break
@@ -3952,8 +3958,8 @@ end
 # this ensures that typeinf_ext doesn't recurse before it can add the item to the workq
 
 for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10)
-    typeinf(m[3], m[1], m[2])
+    typeinf(m[3], m[1], m[2], InferenceParams(needtree=false))
 end
 for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10)
-    typeinf(m[3], m[1], m[2])
+    typeinf(m[3], m[1], m[2], InferenceParams(needtree=false))
 end
