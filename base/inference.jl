@@ -22,8 +22,8 @@ immutable InferenceParams
     # without specifying, or allowing to override, the inference parameters
     InferenceParams(;optimize::Bool=true, inlining::Bool=inlining_enabled(),
                     needtree::Bool=true, cached::Bool=true,
-                    typeunion_len=3::Int, type_depth=7::Int, tupletype_len=15::Int,
-                    tuple_depth=16::Int, tuple_splat=4::Int, union_splitting=4::Int) =
+                    typeunion_len::Int=3, type_depth::Int=7, tupletype_len::Int=15,
+                    tuple_depth::Int=16, tuple_splat::Int=4, union_splitting::Int=4) =
         new(optimize, inlining, needtree, cached, typeunion_len, type_depth, tupletype_len,
             tuple_depth, tuple_splat, union_splitting)
 
