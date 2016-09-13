@@ -2,11 +2,11 @@
 
 import Core: _apply, svec, apply_type, Builtin, IntrinsicFunction
 
-type InferenceParams
+immutable InferenceParams
     # optimization
     optimize::Bool
     inlining::Bool
-    needtree::Bool  # assigned to, hence not immutable
+    needtree::Bool
     cached::Bool
 
     # parameters limiting potentially-infinite types
@@ -1629,7 +1629,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
         # TODO: this assertion seems iffy
         assert(frame !== nothing)
         if params.needtree
-            frame.params.needtree = true
+            frame.params = InferenceParams(frame.params; needtree=true)
         end
     else
         # inference not started yet, make a new frame for a new lambda
@@ -2042,12 +2042,9 @@ function finish(me::InferenceState)
         me.linfo.inlineable = me.linfo.jlcall_api==2 || isinlineable(me.linfo)
     end
 
-    if !me.params.needtree
-        me.params.needtree = me.linfo.inlineable || ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
-            me.linfo.specTypes, me.linfo.def.sig, me.linfo.def) != 0
-    end
-
-    if me.params.needtree
+    if me.params.needtree || me.linfo.inlineable ||
+       ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
+             me.linfo.specTypes, me.linfo.def.sig, me.linfo.def) != 0
         if isdefined(me.linfo, :def)
             # compress code for non-toplevel thunks
             compressedtree = ccall(:jl_compress_ast, Any, (Any,Any), me.linfo, me.linfo.code)
