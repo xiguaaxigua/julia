@@ -1664,14 +1664,14 @@ function typeinf(method::Method, atypes::ANY, sparams::SimpleVector,
                  hooks::InferenceHooks=InferenceHooks())
     return typeinf_edge(method, atypes, sparams, nothing, params, hooks)
 end
+
 function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
         # method lambda - infer this specialization via the method cache
         if linfo.inferred && linfo.code !== nothing
             return linfo
         end
-        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals,
-                                            linfo, InferenceParams(), InferenceHooks())
+        (code, _t, inferred) = typeinf_edge(linfo.def, linfo.specTypes, linfo.sparam_vals, linfo)
         if inferred && code.inferred && linfo !== code
             # This case occurs when the IR for a function has been deleted.
             # `code` will be a newly-created LambdaInfo, and we need to copy its
