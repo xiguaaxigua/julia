@@ -588,7 +588,7 @@ function code_typed(f::ANY, types::ANY=Tuple; optimize=true)
     world = typemax(UInt)
     for x in _methods(f, types, -1, world)
         meth = func_for_method_checked(x[3], types)
-        (code, ty) = Core.Inference.typeinf_code(meth, x[1], x[2], world, optimize, !optimize)
+        (_, code, ty) = Core.Inference.typeinf_code(meth, x[1], x[2], world, optimize, optimize)
         code === nothing && error("inference not successful") # Inference disabled?
         push!(asts, uncompressed_ast(meth, code) => ty)
     end

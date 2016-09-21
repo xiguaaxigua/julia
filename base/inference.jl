@@ -169,8 +169,8 @@ type InferenceState
             min_valid = min_age(linfo.def)
             max_valid = max_age(linfo.def)
         else
-            min_valid = UInt(0)
-            max_valid = UInt(0)
+            min_valid = typemax(UInt)
+            max_valid = typemin(UInt)
         end
         frame = new(
             sp, nl, inmodule, 0,
@@ -1604,7 +1604,7 @@ end
 # build (and start inferring) the inference frame for the linfo
 function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, world::UInt, caller)
     frame = nothing
-    if linfo.inInference
+    if cached && linfo.inInference
         # inference on this signature may be in progress,
         # find the corresponding frame in the active list
         for infstate in active
@@ -1618,7 +1618,6 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, worl
         # TODO: this assertion seems iffy
         assert(frame !== nothing)
     else
-        # XXX: the following logic needs to repeat the test for linfo.inferred now that it hold the lock
         # inference not started yet, make a new frame for a new lambda
         if linfo.def.isstaged
             try
@@ -1630,7 +1629,7 @@ function typeinf_frame(linfo::MethodInstance, optimize::Bool, cached::Bool, worl
         else
             src = get_source(linfo)
         end
-        linfo.inInference = true
+        cached && (linfo.inInference = true)
         frame = InferenceState(linfo, src, world, optimize, inlining_enabled(), cached)
     end
     frame = frame::InferenceState
@@ -1691,36 +1690,37 @@ function typeinf_code(linfo::MethodInstance, world::UInt, optimize::Bool, cached
             # staged functions make this hard since they have two "inferred" conditions,
             # so need to check whether the code itself is also inferred
             inf = linfo.inferred
-            if linfo.jlcall_api == 2
-                method = linfo.def
-                tree = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
-                tree.code = Any[ Expr(:return, QuoteNode(inf)) ]
-                tree.slotnames = Any[ compiler_temp_sym for i = 1:method.nargs ]
-                tree.slotflags = UInt8[ 0 for i = 1:method.nargs ]
-                tree.slottypes = nothing
-                tree.ssavaluetypes = 0
-                tree.inferred = true
-                tree.pure = true
-                tree.inlineable = true
-                i == 2 && ccall(:jl_typeinf_end, Void, ())
-                return (tree, linfo.rettype)
-            elseif isa(inf, CodeInfo)
-                if (inf::CodeInfo).inferred
+            if min_age(linfo) <= world <= max_age(linfo)
+                if linfo.jlcall_api == 2
+                    method = linfo.def
+                    tree = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
+                    tree.code = Any[ Expr(:return, QuoteNode(inf)) ]
+                    tree.slotnames = Any[ compiler_temp_sym for i = 1:method.nargs ]
+                    tree.slotflags = UInt8[ 0 for i = 1:method.nargs ]
+                    tree.slottypes = nothing
+                    tree.ssavaluetypes = 0
+                    tree.inferred = true
+                    tree.pure = true
+                    tree.inlineable = true
                     i == 2 && ccall(:jl_typeinf_end, Void, ())
-                    return (inf, linfo.rettype)
+                    return svec(linfo, tree, linfo.rettype)
+                elseif isa(inf, CodeInfo)
+                    if (inf::CodeInfo).inferred
+                        i == 2 && ccall(:jl_typeinf_end, Void, ())
+                        return svec(linfo, inf, linfo.rettype)
+                    end
                 end
-            else
-                cached = false # don't need to save the new result
             end
         end
         i == 1 && ccall(:jl_typeinf_begin, Void, ())
     end
     frame = typeinf_frame(linfo, optimize, cached, world, nothing)
     ccall(:jl_typeinf_end, Void, ())
-    frame === nothing && return (nothing, Any)
+    frame === nothing && return svec(nothing, nothing, Any)
     frame = frame::InferenceState
-    frame.inferred || return (nothing, Any)
-    return (frame.src, widenconst(frame.bestguess))
+    frame.inferred || return svec(nothing, nothing, Any)
+    frame.cached || return svec(nothing, frame.src, widenconst(frame.bestguess))
+    return svec(frame.linfo, frame.src, widenconst(frame.bestguess))
 end
 
 # compute (and cache) an inferred AST and return the inferred return type
@@ -1752,8 +1752,7 @@ end
 function typeinf_ext(linfo::MethodInstance, world::UInt)
     if isdefined(linfo, :def)
         # method lambda - infer this specialization via the method cache
-        (code, typ) = typeinf_code(linfo, world, true, true)
-        return code
+        return typeinf_code(linfo, world, true, true)
     else
         # toplevel lambda - infer directly
         linfo.inInference = true
@@ -1762,7 +1761,8 @@ function typeinf_ext(linfo::MethodInstance, world::UInt)
         typeinf_loop(frame)
         ccall(:jl_typeinf_end, Void, ())
         @assert frame.inferred # TODO: deal with this better
-        return frame.src
+        @assert frame.linfo === linfo
+        return svec(linfo, frame.src, linfo.rettype)
     end
 end
 
@@ -2111,21 +2111,43 @@ function finish(me::InferenceState)
     if me.cached
         toplevel = !isdefined(me.linfo, :def)
         if !toplevel
-            if !const_api
-                keeptree = me.src.inlineable || ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
-                    me.linfo.specTypes, me.linfo.def.sig, me.linfo.def) != 0
-                if !keeptree
-                    inferred = nothing
-                else
-                    # compress code for non-toplevel thunks
-                    inferred.code = ccall(:jl_compress_ast, Any, (Any, Any), me.linfo.def, inferred.code)
+            min_valid = me.min_valid
+            max_valid = me.max_valid
+        else
+            min_valid = UInt(0)
+            max_valid = UInt(0)
+        end
+        # check if the existing me.linfo metadata is also sufficient to describe the current inference result
+        # to decide if it is worth caching it again (which would also clear any generated code)
+        already_inferred = false
+        if isdefined(me.linfo, :inferred)
+            inf = me.linfo.inferred
+            if !isa(inf, CodeInfo) || (inf::CodeInfo).inferred
+                if min_age(me.linfo) == min_valid && max_age(me.linfo) == max_valid
+                    already_inferred = true
                 end
             end
-            ccall(:jl_specialization_set_world, Void, (Any, UInt, UInt),
-                  me.linfo, me.min_valid, me.max_valid)
         end
-        # TODO: check that mutating the lambda info is OK first?
-        ccall(:jl_set_lambda_rettype, Void, (Any, Any, Any, Any), me.linfo, widenconst(me.bestguess), const_api, inferred)
+        if !already_inferred
+            if !toplevel
+                if !const_api
+                    keeptree = me.src.inlineable || ccall(:jl_is_cacheable_sig, Int32, (Any, Any, Any),
+                        me.linfo.specTypes, me.linfo.def.sig, me.linfo.def) != 0
+                    if !keeptree
+                        inferred = nothing
+                    else
+                        # compress code for non-toplevel thunks
+                        inferred.code = ccall(:jl_compress_ast, Any, (Any, Any), me.linfo.def, inferred.code)
+                    end
+                end
+            end
+            cache = ccall(:jl_set_lambda_inferred, Ref{MethodInstance}, (Any, Any, Any, Any, UInt, UInt),
+                me.linfo, widenconst(me.bestguess), const_api, inferred, min_valid, max_valid)
+            if cache !== me.linfo
+                me.linfo.inInference = false
+                me.linfo = cache
+            end
+        end
     end
 
     # lazy-delete the item from active for several reasons:
@@ -2146,7 +2168,7 @@ function finish(me::InferenceState)
 
     # finalize and record the linfo result
     me.src.inferred = true
-    me.linfo.inInference = false
+    me.cached && (me.linfo.inInference = false)
     me.inferred = true
     nothing
 end

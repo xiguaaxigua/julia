@@ -800,9 +800,10 @@ void jl_add_linfo_in_flight(StringRef name, jl_method_instance_t *linfo, const D
 // (and the shadow module), but doesn't yet compile
 // or generate object code for it
 extern "C"
-jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t *li, jl_code_info_t *src, size_t world)
+jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t **pli, jl_code_info_t *src, size_t world)
 {
     JL_TIMING(CODEGEN);
+    jl_method_instance_t *li = *pli;
     assert(jl_is_method_instance(li));
     jl_llvm_functions_t decls = {};
     // Step 1. See if it is already compiled,
@@ -827,7 +828,8 @@ jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t *li, jl_code_info_t *s
         src = (jl_code_info_t*)li->inferred;
         if (src) {
             if (!jl_is_code_info(src)) {
-                src = jl_type_infer(li, world, 0);
+                src = jl_type_infer(pli, world, 0);
+                li = *pli;
             }
             if (!src || li->jlcall_api == 2) {
                 JL_UNLOCK(&codegen_lock);
@@ -868,8 +870,10 @@ jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t *li, jl_code_info_t *s
     // Step 3. actually do the work of emitting the function
     std::unique_ptr<Module> m;
     JL_TRY {
-        m = emit_function(li, src, world, &li->functionObjectsDecls);
-        decls = li->functionObjectsDecls;
+        jl_llvm_functions_t *pdecls = world ? &li->functionObjectsDecls : &decls;
+        m = emit_function(li, src, world, pdecls);
+        if (world)
+            decls = li->functionObjectsDecls;
         //n_emit++;
     }
     JL_CATCH {
@@ -908,7 +912,7 @@ jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t *li, jl_code_info_t *s
     // Step 5. Add the result to the execution engine now
     jl_finalize_module(m.release(), !toplevel);
 
-    if (li->jlcall_api != 2) {
+    if (world && li->jlcall_api != 2) {
         // if not inlineable, code won't be needed again
         if (JL_DELETE_NON_INLINEABLE && jl_options.debug_level <= 1 &&
             li->def && li->inferred && jl_is_code_info(li->inferred) &&
@@ -1054,7 +1058,6 @@ static jl_method_instance_t *jl_get_unspecialized(jl_method_instance_t *method)
     if (def->unspecialized == NULL) {
         JL_LOCK(&def->writelock);
         if (def->unspecialized == NULL) {
-            // XXX: use computed env rather than empty svec
             def->unspecialized = jl_get_specialized(def, def->sig, jl_emptysvec);
             jl_gc_wb(def, def->unspecialized);
         }
@@ -1087,33 +1090,36 @@ jl_generic_fptr_t jl_generate_fptr(jl_method_instance_t *li, void *_F, size_t wo
         return fptr;
     }
     jl_method_instance_t *unspec = NULL;
-    if (li->def && !li->def->isstaged && li->def->unspecialized) {
-        unspec = li->def->unspecialized;
-    }
-    if (!F || !jl_can_finalize_function(F)) {
-        // can't compile F in the JIT right now,
-        // so instead compile an unspecialized version
-        // and return its fptr instead
-        if (!unspec)
-            unspec = jl_get_unspecialized(li); // get-or-create the unspecialized version to cache the result
-        jl_code_info_t *src = unspec->def->isstaged ? jl_code_for_staged(unspec) : unspec->def->source;
-        fptr.fptr = unspec->fptr;
-        fptr.jlcall_api = unspec->jlcall_api;
-        if (fptr.fptr && fptr.jlcall_api) {
-            JL_UNLOCK(&codegen_lock);
-            return fptr;
+    if (li->def) {
+        if (!li->def->isstaged && li->def->unspecialized) {
+            unspec = li->def->unspecialized;
         }
-        jl_llvm_functions_t decls = unspec->functionObjectsDecls;
-        if (unspec == li) {
-            // temporarily clear the decls so that it will compile our unspec version of src
-            unspec->functionObjectsDecls.functionObject = NULL;
-            unspec->functionObjectsDecls.specFunctionObject = NULL;
+        if (!F || !jl_can_finalize_function(F)) {
+            // can't compile F in the JIT right now,
+            // so instead compile an unspecialized version
+            // and return its fptr instead
+            if (!unspec)
+                unspec = jl_get_unspecialized(li); // get-or-create the unspecialized version to cache the result
+            jl_code_info_t *src = unspec->def->isstaged ? jl_code_for_staged(unspec) : unspec->def->source;
+            fptr.fptr = unspec->fptr;
+            fptr.jlcall_api = unspec->jlcall_api;
+            if (fptr.fptr && fptr.jlcall_api) {
+                JL_UNLOCK(&codegen_lock);
+                return fptr;
+            }
+            jl_llvm_functions_t decls = unspec->functionObjectsDecls;
+            if (unspec == li) {
+                // temporarily clear the decls so that it will compile our unspec version of src
+                unspec->functionObjectsDecls.functionObject = NULL;
+                unspec->functionObjectsDecls.specFunctionObject = NULL;
+            }
+            assert(src);
+            F = (Function*)jl_compile_linfo(&unspec, src, unspec->min_world).functionObject; // this does not change unspec
+            if (unspec == li) {
+                unspec->functionObjectsDecls = decls;
+            }
+            assert(jl_can_finalize_function(F));
         }
-        F = (Function*)jl_compile_linfo(unspec, src, world).functionObject;
-        if (unspec == li) {
-            unspec->functionObjectsDecls = decls;
-        }
-        assert(jl_can_finalize_function(F));
     }
     assert(F);
     fptr.fptr = (jl_fptr_t)getAddressForFunction(F);
@@ -1231,7 +1237,7 @@ void *jl_get_llvmf_defn(jl_method_instance_t *linfo, size_t world, bool getwrapp
     jl_code_info_t *src = (jl_code_info_t*)linfo->inferred;
     JL_GC_PUSH1(&src);
     if (!src || !jl_is_code_info(src)) {
-        src = jl_type_infer(linfo, world, 0);
+        src = jl_type_infer(&linfo, world, 0);
         if (!src)
             src = linfo->def->isstaged ? jl_code_for_staged(linfo) : linfo->def->source;
     }
@@ -1308,7 +1314,7 @@ void *jl_get_llvmf_decl(jl_method_instance_t *linfo, size_t world, bool getwrapp
     }
 
     // compile this normally
-    jl_llvm_functions_t decls = jl_compile_for_dispatch(linfo, world);
+    jl_llvm_functions_t decls = jl_compile_for_dispatch(&linfo, world);
 
     if (decls.functionObject == NULL && linfo->jlcall_api == 2 && linfo->def) {
         // normally we don't generate native code for these functions, so need an exception here
@@ -1317,11 +1323,11 @@ void *jl_get_llvmf_decl(jl_method_instance_t *linfo, size_t world, bool getwrapp
         decls = linfo->functionObjectsDecls;
         if (decls.functionObject == NULL) {
             jl_code_info_t *src = NULL;
-            src = jl_type_infer(linfo, world, 0);
+            src = jl_type_infer(&linfo, world, 0);
             if (!src) {
                 src = linfo->def->isstaged ? jl_code_for_staged(linfo) : linfo->def->source;
             }
-            decls = jl_compile_linfo(linfo, src, world);
+            decls = jl_compile_linfo(&linfo, src, world);
             linfo->functionObjectsDecls = decls;
         }
         JL_UNLOCK(&codegen_lock);
@@ -2853,7 +2859,7 @@ static jl_cgval_t emit_invoke(jl_expr_t *ex, jl_codectx_t *ctx)
     if (lival.constant) {
         jl_method_instance_t *li = (jl_method_instance_t*)lival.constant;
         assert(jl_is_method_instance(li));
-        jl_llvm_functions_t decls = jl_compile_linfo(li, NULL, ctx->world);
+        jl_llvm_functions_t decls = jl_compile_linfo(&li, NULL, ctx->world);
         if (li->jlcall_api == 2) {
             assert(li->inferred);
             return mark_julia_const(li->inferred);
@@ -3516,8 +3522,8 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
         name = jl_symbol_name(lam->def->name);
         jl_code_info_t *src = NULL;
         if (!lam->inferred) // TODO: this isn't ideal to be unconditionally calling type inference from here
-            src = jl_type_infer(lam, world, 0);
-        jl_compile_linfo(lam, src, world);
+            src = jl_type_infer(&lam, world, 0);
+        jl_compile_linfo(&lam, src, world);
         if (lam->jlcall_api != 2) {
             if (lam->functionObjectsDecls.functionObject == NULL ||
                     jl_jlcall_api(lam->functionObjectsDecls.functionObject) != 1) {

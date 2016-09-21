@@ -643,7 +643,7 @@ jl_value_t *jl_toplevel_eval_flex(jl_value_t *e, int fast, int expanded)
     if (ewc) {
         jl_method_instance_t *li = jl_new_thunk(thk);
         size_t world = jl_get_ptls_states()->world_age;
-        jl_type_infer(li, world, 0);
+        jl_type_infer(&li, world, 0);
         jl_value_t *dummy_f_arg = NULL;
         result = jl_call_method_internal(li, &dummy_f_arg, 1);
     }

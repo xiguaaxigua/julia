@@ -460,7 +460,7 @@ STATIC_INLINE jl_value_t *jl_call_staged(jl_svec_t *sparam_vals, jl_method_insta
     fptr.jlcall_api = generator->jlcall_api;
     if (__unlikely(fptr.fptr == NULL || fptr.jlcall_api == 0)) {
         size_t world = generator->def->min_world;
-        void *F = jl_compile_linfo(generator, (jl_code_info_t*)generator->inferred, world).functionObject;
+        void *F = jl_compile_linfo(&generator, (jl_code_info_t*)generator->inferred, world).functionObject;
         fptr = jl_generate_fptr(generator, F, world);
     }
     assert(jl_svec_len(generator->def->sparam_syms) == jl_svec_len(sparam_vals));

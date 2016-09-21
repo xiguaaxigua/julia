@@ -188,10 +188,10 @@ STATIC_INLINE void *jl_gc_alloc_buf(jl_ptls_t ptls, size_t sz)
     return jl_gc_alloc(ptls, sz, (void*)jl_buff_tag);
 }
 
-jl_code_info_t *jl_type_infer(jl_method_instance_t *li, size_t world, int force);
+jl_code_info_t *jl_type_infer(jl_method_instance_t **li, size_t world, int force);
 jl_generic_fptr_t jl_generate_fptr(jl_method_instance_t *li, void *F, size_t world);
-jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t *li, jl_code_info_t *src, size_t world);
-jl_llvm_functions_t jl_compile_for_dispatch(jl_method_instance_t *li, size_t world);
+jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t **li, jl_code_info_t *src, size_t world);
+jl_llvm_functions_t jl_compile_for_dispatch(jl_method_instance_t **li, size_t world);
 JL_DLLEXPORT int jl_compile_hint(jl_tupletype_t *types);
 jl_code_info_t *jl_new_code_info_from_ast(jl_expr_t *ast);
 jl_method_t *jl_new_method(jl_code_info_t *definition,
@@ -215,7 +215,7 @@ STATIC_INLINE jl_value_t *jl_call_method_internal(jl_method_instance_t *meth, jl
         // first see if it likely needs to be compiled
         void *F = meth->functionObjectsDecls.functionObject;
         if (!F) // ask codegen to try to turn it into llvm code
-            F = jl_compile_for_dispatch(meth, world).functionObject;
+            F = jl_compile_for_dispatch(&meth, world).functionObject;
         if (meth->jlcall_api == 2)
             return meth->inferred;
         // if it hasn't been inferred, try using the unspecialized meth cache instead
