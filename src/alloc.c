@@ -872,7 +872,6 @@ JL_DLLEXPORT jl_typename_t *jl_new_typename_in(jl_sym_t *name, jl_module_t *modu
     tn->names = NULL;
     tn->hash = bitmix(bitmix(module ? module->uuid : 0, name->hash), 0xa1ada1da);
     tn->mt = NULL;
-    tn->backedges = NULL;
     return tn;
 }
 

@@ -961,11 +961,7 @@ function abstract_call_gf_by_type(f::ANY, atype::ANY, sv::InferenceState)
     if !fullmatch && !is(rettype, Any)
         # also need an edge to the method table in case something gets
         # added that did not intersect with any existing method
-        if is(ft.name, Type.name)
-            add_ctor_backedge((tname::DataType).name, sv)
-        else
-            add_mt_backedge(ft.name.mt, sv)
-        end
+        add_mt_backedge(ft.name.mt, argtype, sv)
     end
     # if rettype is Bottom we've found a method not found error
     #print("=> ", rettype, "\n")
@@ -1557,27 +1553,19 @@ end
 function add_backedge(li::MethodInstance, sv::InferenceState)
     caller = sv.linfo
     isdefined(caller, :def) || return # don't add backedges to toplevel exprs
-    isdefined(li, :backedges) || (li.backedges = []) # lazy-init the backedges array
-    in(caller, li.backedges) || push!(li.backedges, caller) # add a backedge from callee to caller
+    ccall(:jl_method_instance_add_backedge, Void, (Any, Any), li, caller)
     update_valid_age!(li, sv)
     nothing
 end
-function add_mt_backedge(mt::MethodTable, sv::InferenceState)
+function add_mt_backedge(mt::MethodTable, typ::ANY, sv::InferenceState)
     caller = sv.linfo
     isdefined(caller, :def) || return # don't add backedges to toplevel exprs
-    isdefined(mt, :backedges) || (mt.backedges = []) # lazy-init the backedges array
-    in(caller, mt.backedges) || push!(mt.backedges, caller) # add a backedge from callee to caller
+    ccall(:jl_method_table_add_backedge, Void, (Any, Any, Any), mt, typ, caller)
     # TODO: did this affect the valid ages for sv?
     nothing
 end
-function add_ctor_backedge(ctor::TypeName, sv::InferenceState)
-    caller = sv.linfo
-    isdefined(caller, :def) || return # don't add backedges to toplevel exprs
-    isdefined(ctor, :backedges) || (ctor.backedges = []) # lazy-init the backedges array
-    in(caller, ctor.backedges) || push!(ctor.backedges, caller) # add a backedge from callee to caller
-    # TODO: did this affect the valid ages for sv?
-    nothing
-end
+# TODO: don't add backedges until caching (they are currently pointing to the wrong linfo)
+# TODO: track backedges list per-statement (so looping is more correct)
 
 function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, preexisting::Bool=false)
     if world < min_age(method) || world > max_age(method)
@@ -1659,13 +1647,13 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
     code = code_for_method(method, atypes, sparams, caller.world)
     code === nothing && return Any
     code = code::MethodInstance
-    add_backedge(code, caller)
     if isdefined(code, :inferred)
         # return rettype if the code is already inferred
         # staged functions make this hard since they have two "inferred" conditions,
         # so need to check whether the code itself is also inferred
         inf = code.inferred
         if !isa(inf, CodeInfo) || (inf::CodeInfo).inferred
+            add_backedge(code, caller)
             return code.rettype
         end
     end
@@ -1685,6 +1673,7 @@ function typeinf_code(method::Method, atypes::ANY, sparams::SimpleVector, world:
 end
 function typeinf_code(linfo::MethodInstance, world::UInt, optimize::Bool, cached::Bool)
     for i = 1:2 # test-and-lock-and-test
+        i == 2 && ccall(:jl_typeinf_begin, Void, ())
         if cached && isdefined(linfo, :inferred)
             # see if this code already exists in the cache
             # staged functions make this hard since they have two "inferred" conditions,
@@ -1712,7 +1701,6 @@ function typeinf_code(linfo::MethodInstance, world::UInt, optimize::Bool, cached
                 end
             end
         end
-        i == 1 && ccall(:jl_typeinf_begin, Void, ())
     end
     frame = typeinf_frame(linfo, optimize, cached, world, nothing)
     ccall(:jl_typeinf_end, Void, ())
@@ -1729,6 +1717,7 @@ function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, world:
     code === nothing && return nothing
     code = code::MethodInstance
     for i = 1:2 # test-and-lock-and-test
+        i == 2 && ccall(:jl_typeinf_begin, Void, ())
         if cached && isdefined(code, :inferred)
             # see if this rettype already exists in the cache
             # staged functions make this hard since they have two "inferred" conditions,
@@ -1739,7 +1728,6 @@ function typeinf_type(method::Method, atypes::ANY, sparams::SimpleVector, world:
                 return code.rettype
             end
         end
-        i == 1 && ccall(:jl_typeinf_begin, Void, ())
     end
     frame = typeinf_frame(code, cached, cached, world, nothing)
     ccall(:jl_typeinf_end, Void, ())

@@ -89,9 +89,8 @@ B265(x::Any, dummy::Void) = B265{UInt8}(x, dummy)
 @test (B265_(2)::B265{Float64}).field1 === 2.0e0
 @test (B265_(3)::B265{UInt8}).field1 === 0x03
 
-# FIXME: typename.backedge fails to get triggered for this case
-#@test Base.return_types(B265_, (Int,)) == Any[Union{B265{Float64}, B265{Int}, B265{UInt8}}]
-#@test Core.Inference.return_type(B265_, (Int,)) == Union{B265{Float64}, B265{Int}, B265{UInt8}}
+@test Base.return_types(B265_, (Int,)) == Any[Union{B265{Float64}, B265{Int}, B265{UInt8}}]
+@test Core.Inference.return_type(B265_, (Int,)) == Union{B265{Float64}, B265{Int}, B265{UInt8}}
 
 
 # test oldworld call / inference

@@ -1138,19 +1138,24 @@ static void update_max_args(jl_methtable_t *mt, jl_tupletype_t *type)
 }
 
 // invalidate cached methods that overlap this definition
-static void invalidate_recursive(jl_array_t *backedges, size_t max_world)
+static void invalidate_method_instance(jl_method_instance_t *replaced, size_t max_world)
 {
-    if (backedges) {
-        size_t i, l = jl_array_len(backedges);
-        for (i = 0; i < l; i++) {
-            jl_method_instance_t *replaced = (jl_method_instance_t*)jl_array_ptr_ref(backedges, i);
-            if (replaced->max_world > max_world) {
-                replaced->max_world = max_world;
-                update_caches(replaced, set_max_world);
-                invalidate_recursive(replaced->backedges, max_world);
+    JL_LOCK_NOGC(&replaced->def->writelock);
+    jl_array_t *backedges = replaced->backedges;
+    if (replaced->max_world > max_world) {
+        assert(replaced->min_world <= max_world && "attempting to set invalid world constraints");
+        replaced->max_world = max_world;
+        update_caches(replaced, set_max_world);
+        if (backedges) {
+            size_t i, l = jl_array_len(backedges);
+            for (i = 0; i < l; i++) {
+                jl_method_instance_t *replaced = (jl_method_instance_t*)jl_array_ptr_ref(backedges, i);
+                invalidate_method_instance(replaced, max_world);
             }
         }
     }
+    replaced->backedges = NULL;
+    JL_UNLOCK_NOGC(&replaced->def->writelock);
 }
 struct invalidate_conflicting_env {
     struct typemap_intersection_env match;
@@ -1165,19 +1170,67 @@ static int invalidate_conflicting(jl_typemap_entry_t *oldentry, struct typemap_i
     for (i = 0; i < n; i++) {
         if (d[i] == oldentry->func.linfo->def) {
             if (oldentry->max_world > closure->max_world) {
-                jl_method_instance_t *li = oldentry->func.linfo;
                 assert(oldentry->min_world <= closure->max_world && "attempting to set invalid world constraints");
-                assert(li->min_world <= closure->max_world && "attempting to set invalid world constraints");
+                assert(oldentry->max_world >= closure->max_world && "typemap consistency violation detected");
                 oldentry->max_world = closure->max_world;
-                li->max_world = closure->max_world;
-                jl_array_t *backedges = li->backedges; // unrooted, but no allocations during invalidate_recursive
-                li->backedges = NULL;
-                invalidate_recursive(backedges, closure->max_world);
+                invalidate_method_instance(oldentry->func.linfo, closure->max_world);
             }
             return 1;
         }
     }
     return 1;
+}
+
+// add a backedge from callee to caller
+JL_DLLEXPORT void jl_method_instance_add_backedge(jl_method_instance_t *callee, jl_method_instance_t *caller)
+{
+    JL_LOCK(&callee->def->writelock);
+    if (!callee->backedges) {
+        // lazy-init the backedges array
+        callee->backedges = jl_alloc_vec_any(1);
+        jl_gc_wb(callee, callee->backedges);
+        jl_array_ptr_set(callee->backedges, 0, caller);
+    }
+    else {
+        size_t i, l = jl_array_len(callee->backedges);
+        for (i = 0; i < l; i++) {
+            if (jl_array_ptr_ref(callee->backedges, i) == (jl_value_t*)caller)
+                break;
+        }
+        if (i == l) {
+            jl_array_ptr_1d_push(callee->backedges, (jl_value_t*)caller);
+        }
+    }
+    JL_UNLOCK(&callee->def->writelock);
+}
+
+// add a backedge from a non-existent signature to caller
+JL_DLLEXPORT void jl_method_table_add_backedge(jl_methtable_t *mt, jl_value_t *typ, jl_value_t *linfo)
+{
+    JL_LOCK(&mt->writelock);
+    if (!mt->backedges) {
+        // lazy-init the backedges array
+        mt->backedges = jl_alloc_vec_any(2);
+        jl_gc_wb(mt, mt->backedges);
+        jl_array_ptr_set(mt->backedges, 0, typ);
+        jl_array_ptr_set(mt->backedges, 0, linfo);
+    }
+    else {
+        size_t i, l = jl_array_len(mt->backedges);
+        for (i = 1; i < l; i += 2) {
+            if (jl_types_equal(jl_array_ptr_ref(mt->backedges, i - 1), typ)) {
+                if (jl_array_ptr_ref(mt->backedges, i) == linfo) {
+                    JL_UNLOCK(&mt->writelock);
+                    return;
+                }
+                // reuse the already cached instance of this type
+                typ = jl_array_ptr_ref(mt->backedges, i - 1);
+            }
+        }
+        jl_array_ptr_1d_push(mt->backedges, typ);
+        jl_array_ptr_1d_push(mt->backedges, linfo);
+    }
+    JL_UNLOCK(&mt->writelock);
 }
 
 JL_DLLEXPORT void jl_method_table_insert(jl_methtable_t *mt, jl_method_t *method, jl_tupletype_t *simpletype)
@@ -1205,21 +1258,25 @@ JL_DLLEXPORT void jl_method_table_insert(jl_methtable_t *mt, jl_method_t *method
     }
     else {
         env.shadowed = check_ambiguous_matches(mt->defs, newentry);
-        jl_array_t *backedges = mt->backedges; // unrooted, but no allocations during invalidate_recursive
-        mt->backedges = NULL;
-        invalidate_recursive(backedges, env.max_world);
-        if (mt == jl_type_type_mt) {
-            assert(jl_is_tuple_type(type));
-            jl_value_t *dt0 = jl_tparam0(type);
-            if (jl_is_typevar(dt0))
-                dt0 = ((jl_tvar_t*)dt0)->ub;
-            if (jl_is_typector(dt0))
-                dt0 = ((jl_typector_t*)dt0)->body;
-            if (jl_is_datatype(dt0)) { // TODO: handle Union and abstract types here
-                jl_array_t *backedges = ((jl_datatype_t*)dt0)->name->backedges; // unrooted, but no allocations during invalidate_recursive
-                ((jl_datatype_t*)dt0)->name->backedges = NULL;
-                invalidate_recursive(backedges, env.max_world);
+        if (mt->backedges) {
+            jl_value_t **backedges = jl_array_data(mt->backedges);
+            size_t i, na = jl_array_len(mt->backedges);
+            size_t ins = 0;
+            for (i = 1; i < na; i += 2) {
+                jl_value_t *backedgetyp = backedges[i - 1];
+                if (jl_type_intersection(backedgetyp, (jl_value_t*)type) != (jl_value_t*)jl_bottom_type) {
+                    jl_method_instance_t *backedge = (jl_method_instance_t*)backedges[i];
+                    invalidate_method_instance(backedge, env.max_world);
+                }
+                else {
+                    backedges[ins++] = backedges[i - 1];
+                    backedges[ins++] = backedges[i - 0];
+                }
             }
+            if (ins == 0)
+                mt->backedges = NULL;
+            else
+                jl_array_del_end(mt->backedges, na - ins);
         }
     }
     if (env.shadowed) {
