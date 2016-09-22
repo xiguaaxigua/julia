@@ -502,13 +502,13 @@ Text I/O
 
    Print (using :func:`print`\ ) ``xs`` followed by a newline. If ``io`` is not supplied, prints to :obj:`STDOUT`\ .
 
-.. function:: print_with_color(color::Union{Symbol, Int}, [io], strings...)
+.. function:: print_with_color(color::Union{Symbol, Int}, [io], strings...; bold::Bool = false)
 
    .. Docstring generated from Julia source
 
    Print strings in a color specified as a symbol.
 
-   ``color`` may take any of the values ``:normal``\ , ``:bold``\ , ``:black``\ , ``:blue``\ , ``:cyan``\ , ``:green``\ , ``:magenta``\ , ``:red``\ , ``:white``\ , or  ``:yellow`` or an integer between 0 and 255 inclusive. Note that not all terminals support 256 colors.
+   ``color`` may take any of the values ``:normal``\ , ``:default``\ , ``:bold``\ , ``:black``\ , ``:blue``\ , ``:cyan``\ , ``:green``\ , ``:light_black``\ , ``:light_blue``\ , ``:light_cyan``\ , ``:light_green``\ , ``:light_magenta``\ , ``:light_red``\ , ``:light_yellow``\ , ``:magenta``\ , ``:red``\ , ``:white``\ , or  ``:yellow`` or an integer between 0 and 255 inclusive. Note that not all terminals support 256 colors. If the keyword ``bold`` is given as ``true``\ , the result will be printed in bold.
 
 .. function:: info(msg...; prefix="INFO: ")
 
