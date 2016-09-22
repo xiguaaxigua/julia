@@ -826,7 +826,9 @@ function abstract_call_gf_by_type(f::ANY, atype::ANY, sv::InferenceState)
             return Any
         end
     end
-    applicable = _methods_by_ftype(argtype, 4, sv.world)
+    min_valid = UInt[typemin(UInt)]
+    max_valid = UInt[typemax(UInt)]
+    applicable = _methods_by_ftype(argtype, 4, sv.world, min_valid, max_valid)
     rettype = Bottom
     if is(applicable, false)
         # this means too many methods matched
@@ -956,6 +958,7 @@ function abstract_call_gf_by_type(f::ANY, atype::ANY, sv::InferenceState)
         # also need an edge to the method table in case something gets
         # added that did not intersect with any existing method
         add_mt_backedge(ft.name.mt, argtype, sv)
+        update_valid_age!(min_valid[1], max_valid[1], sv)
     end
     if isempty(x)
         # TODO: this is needed because type intersection is wrong in some cases
@@ -1060,7 +1063,9 @@ function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv::InferenceState
         end
     end
 
-    meth = _methods_by_ftype(atype, 1, sv.world)
+    min_valid = UInt[typemin(UInt)]
+    max_valid = UInt[typemax(UInt)]
+    meth = _methods_by_ftype(atype, 1, sv.world, min_valid, max_valid)
     if meth === false || length(meth) != 1
         return false
     end
@@ -1074,6 +1079,7 @@ function pure_eval_call(f::ANY, argtypes::ANY, atype, vtypes, sv::InferenceState
     args = Any[ isa(a,Const) ? a.val : a.parameters[1] for a in drop(argtypes,1) ]
     try
         value = Core._apply_pure(f, args)
+        # TODO: add some sort of edge(s)
         return abstract_eval_constant(value)
     catch
         return false
@@ -1530,6 +1536,7 @@ function converge_valid_age!(sv::InferenceState)
                 i.max_valid = sv.max_valid
                 updated = true
             end
+            @assert !isdefined(i.linfo, :def) || !i.cached || i.min_valid <= i.world <= i.max_valid "invalid age range update"
             if updated
                 converge_valid_age!(i)
             end
@@ -1537,16 +1544,16 @@ function converge_valid_age!(sv::InferenceState)
     end
     nothing
 end
-function update_valid_age!(edge::InferenceState, sv::InferenceState)
-    sv.min_valid = max(edge.min_valid, sv.min_valid)
-    sv.max_valid = min(edge.max_valid, sv.max_valid)
+
+function update_valid_age!(min_valid::UInt, max_valid::UInt, sv::InferenceState)
+    sv.min_valid = max(sv.min_valid, min_valid)
+    sv.max_valid = min(sv.max_valid, max_valid)
+    @assert !isdefined(sv.linfo, :def) || !sv.cached || sv.min_valid <= sv.world <= sv.max_valid "invalid age range update"
     nothing
 end
-function update_valid_age!(li::MethodInstance, sv::InferenceState)
-    sv.min_valid = max(sv.min_valid, min_age(li))
-    sv.max_valid = min(sv.max_valid, max_age(li))
-    nothing
-end
+update_valid_age!(edge::InferenceState, sv::InferenceState) = update_valid_age!(edge.min_valid, edge.max_valid, sv)
+update_valid_age!(li::MethodInstance, sv::InferenceState) = update_valid_age!(min_age(li), max_age(li), sv)
+
 function add_backedge(li::MethodInstance, caller::InferenceState)
     isdefined(caller.linfo, :def) || return # don't add backedges to toplevel exprs
     if caller.stmt_edges[caller.currpc] === ()
@@ -1556,6 +1563,7 @@ function add_backedge(li::MethodInstance, caller::InferenceState)
     update_valid_age!(li, caller)
     nothing
 end
+
 function add_mt_backedge(mt::MethodTable, typ::ANY, caller::InferenceState)
     isdefined(caller.linfo, :def) || return # don't add backedges to toplevel exprs
     if caller.stmt_edges[caller.currpc] === ()
@@ -1566,6 +1574,7 @@ function add_mt_backedge(mt::MethodTable, typ::ANY, caller::InferenceState)
     # TODO: how to compute the affect this has on valid ages for caller?
     nothing
 end
+
 function finalize_backedges(frame::InferenceState)
     caller = frame.linfo
     for edges in frame.stmt_edges
@@ -1666,7 +1675,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
     code = code_for_method(method, atypes, sparams, caller.world)
     code === nothing && return Any
     code = code::MethodInstance
-    add_backedge(code, caller)
+    add_backedge(code, caller) # TODO: need to defer the tracking of this backedge till later
     if isdefined(code, :inferred)
         # return rettype if the code is already inferred
         # staged functions make this hard since they have two "inferred" conditions,
@@ -2682,7 +2691,9 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     else
         atype = atype_unlimited
     end
-    meth = _methods_by_ftype(atype, 1, sv.world)
+    min_valid = UInt[typemin(UInt)]
+    max_valid = UInt[typemax(UInt)]
+    meth = _methods_by_ftype(atype, 1, sv.world, min_valid, max_valid)
     if meth === false || length(meth) != 1
         return invoke_NF()
     end
@@ -4083,9 +4094,9 @@ end
 # make sure that typeinf is executed before turning on typeinf_ext
 # this ensures that typeinf_ext doesn't recurse before it can add the item to the workq
 
-for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10, typemax(UInt))
+for m in _methods_by_ftype(Tuple{typeof(typeinf_loop), Vararg{Any}}, 10, typemax(UInt), UInt[typemin(UInt)], UInt[typemax(UInt)])
     typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end
-for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10, typemax(UInt))
+for m in _methods_by_ftype(Tuple{typeof(typeinf_edge), Vararg{Any}}, 10, typemax(UInt), UInt[typemin(UInt)], UInt[typemax(UInt)])
     typeinf_type(m[3], m[1], m[2], typemax(UInt))
 end

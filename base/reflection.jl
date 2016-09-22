@@ -349,10 +349,12 @@ end
 function _methods(f::ANY, t::ANY, lim::Int, world::UInt)
     ft = isa(f,Type) ? Type{f} : typeof(f)
     tt = isa(t,Type) ? Tuple{ft, t.parameters...} : Tuple{ft, t...}
-    return _methods_by_ftype(tt, lim, world)
+    min = UInt[typemin(UInt)]
+    max = UInt[typemax(UInt)]
+    return _methods_by_ftype(tt, lim, world, min, max)
 end
 
-function _methods_by_ftype(t::ANY, lim::Int, world::UInt)
+function _methods_by_ftype(t::ANY, lim::Int, world::UInt, min::Array{UInt,1}, max::Array{UInt,1})
     tp = t.parameters::SimpleVector
     nu = 1
     for ti in tp
@@ -361,16 +363,16 @@ function _methods_by_ftype(t::ANY, lim::Int, world::UInt)
         end
     end
     if 1 < nu <= 64
-        return _methods(Any[tp...], length(tp), lim, [], world)
+        return _methods_by_ftype(Any[tp...], length(tp), lim, [], world, min, max)
     end
     # XXX: the following can return incorrect answers that the above branch would have corrected
-    return ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt), t, lim, 0, world)
+    return ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt, Ptr{UInt}, Ptr{UInt}), t, lim, 0, world, min, max)
 end
 
-function _methods(t::Array, i, lim::Integer, matching::Array{Any,1}, world::UInt)
+function _methods_by_ftype(t::Array, i, lim::Integer, matching::Array{Any,1}, world::UInt, min::Array{UInt,1}, max::Array{UInt,1})
     if i == 0
         world = typemax(UInt)
-        new = ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt), Tuple{t...}, lim, 0, world)
+        new = ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt, Ptr{UInt}, Ptr{UInt}), Tuple{t...}, lim, 0, world, min, max)
         new === false && return false
         append!(matching, new::Array{Any,1})
     else
@@ -378,14 +380,14 @@ function _methods(t::Array, i, lim::Integer, matching::Array{Any,1}, world::UInt
         if isa(ti, Union)
             for ty in (ti::Union).types
                 t[i] = ty
-                if _methods(t, i - 1, lim, matching, world) === false
+                if _methods_by_ftype(t, i - 1, lim, matching, world, min, max) === false
                     t[i] = ti
                     return false
                 end
             end
             t[i] = ti
         else
-            return _methods(t, i - 1, lim, matching, world)
+            return _methods_by_ftype(t, i - 1, lim, matching, world, min, max)
         end
     end
     return matching
@@ -435,7 +437,9 @@ function methods_including_ambiguous(f::ANY, t::ANY)
     ft = isa(f,Type) ? Type{f} : typeof(f)
     tt = isa(t,Type) ? Tuple{ft, t.parameters...} : Tuple{ft, t...}
     world = typemax(UInt)
-    ms = ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt), tt, -1, 1, world)::Array{Any,1}
+    min = UInt[typemin(UInt)]
+    max = UInt[typemax(UInt)]
+    ms = ccall(:jl_matching_methods, Any, (Any, Cint, Cint, UInt, Ptr{UInt}, Ptr{UInt}), tt, -1, 1, world, min, max)::Array{Any,1}
     return MethodList(Method[m[3] for m in ms], typeof(f).name.mt)
 end
 function methods(f::ANY)
@@ -745,7 +749,9 @@ end
 function isambiguous(m1::Method, m2::Method)
     ti = typeintersect(m1.sig, m2.sig)
     ti === Bottom && return false
-    ml = _methods_by_ftype(ti, -1, typemax(UInt))
+    min = UInt[typemin(UInt)]
+    max = UInt[typemax(UInt)]
+    ml = _methods_by_ftype(ti, -1, typemax(UInt), min, max)
     isempty(ml) && return true
     for m in ml
         if ti <: m[3].sig
