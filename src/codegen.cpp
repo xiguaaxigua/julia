@@ -809,37 +809,61 @@ jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t **pli, jl_code_info_t 
     // Step 1. See if it is already compiled,
     //         Get the codegen lock,
     //         And get the source
-    if (!src) {
+    if (li->def == NULL) {
+        JL_LOCK(&codegen_lock);
+        src = (jl_code_info_t*)li->inferred;
+        decls = li->functionObjectsDecls;
+        if (decls.functionObject != NULL || !src || !jl_is_code_info(src) || li->jlcall_api == 2) {
+            JL_UNLOCK(&codegen_lock);
+            return decls;
+        }
+    }
+    else if (!src) {
         // Step 1a. If the caller didn't provide the source,
         //          try to infer it for ourself
         // first see if it is already compiled
         decls = li->functionObjectsDecls;
         if (decls.functionObject != NULL || li->jlcall_api == 2) {
-            return decls;
+            if (li->min_world <= world && li->max_world >= world)
+                return decls;
         }
         JL_LOCK(&codegen_lock);
-        decls = li->functionObjectsDecls;
-        if (decls.functionObject != NULL || li->jlcall_api == 2) {
-            JL_UNLOCK(&codegen_lock);
-            return decls;
-        }
-
-        // see if it is inferred
-        src = (jl_code_info_t*)li->inferred;
-        if (src) {
-            if (!jl_is_code_info(src)) {
-                src = jl_type_infer(pli, world, 0);
-                li = *pli;
+        if (li->min_world <= world && li->max_world >= world) {
+            decls = li->functionObjectsDecls;
+            if (decls.functionObject != NULL || li->jlcall_api == 2) {
+                JL_UNLOCK(&codegen_lock);
+                return decls;
             }
-            if (!src || li->jlcall_api == 2) {
+
+            // see if it is inferred
+            src = (jl_code_info_t*)li->inferred;
+            if (src) {
+                if (!jl_is_code_info(src)) {
+                    src = jl_type_infer(pli, world, 0);
+                    li = *pli;
+                }
+                if (!src || li->jlcall_api == 2) {
+                    JL_UNLOCK(&codegen_lock);
+                    return decls;
+                }
+            }
+            else {
+                // declare a failure to compile
                 JL_UNLOCK(&codegen_lock);
                 return decls;
             }
         }
         else {
-            // failed to compile
-            JL_UNLOCK(&codegen_lock);
-            return decls;
+            // lambda is invalid for this world,
+            // so get a version that is valid
+            src = (jl_code_info_t*)li->inferred;
+            if (src)
+                src = jl_type_infer(pli, world, 0);
+            li = *pli;
+            if (!src || li->jlcall_api == 2) {
+                JL_UNLOCK(&codegen_lock);
+                return decls;
+            }
         }
     }
     else {
@@ -870,7 +894,13 @@ jl_llvm_functions_t jl_compile_linfo(jl_method_instance_t **pli, jl_code_info_t 
     // Step 3. actually do the work of emitting the function
     std::unique_ptr<Module> m;
     JL_TRY {
-        jl_llvm_functions_t *pdecls = world ? &li->functionObjectsDecls : &decls;
+        jl_llvm_functions_t *pdecls;
+        if (li->min_world <= world && li->max_world >= world)
+            pdecls = &li->functionObjectsDecls;
+        else if (li->def == NULL)
+            pdecls = &li->functionObjectsDecls;
+        else
+            pdecls = &decls;
         m = emit_function(li, src, world, pdecls);
         if (world)
             decls = li->functionObjectsDecls;
