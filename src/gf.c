@@ -1213,7 +1213,7 @@ JL_DLLEXPORT void jl_method_table_add_backedge(jl_methtable_t *mt, jl_value_t *t
         mt->backedges = jl_alloc_vec_any(2);
         jl_gc_wb(mt, mt->backedges);
         jl_array_ptr_set(mt->backedges, 0, typ);
-        jl_array_ptr_set(mt->backedges, 0, linfo);
+        jl_array_ptr_set(mt->backedges, 1, linfo);
     }
     else {
         size_t i, l = jl_array_len(mt->backedges);

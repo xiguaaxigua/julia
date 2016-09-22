@@ -55,6 +55,7 @@ type InferenceState
     max_valid::UInt
     nargs::Int
     stmt_types::Vector{Any}
+    stmt_edges::Vector{Any}
     # return type
     bestguess #::Type
     # current active instruction pointers
@@ -99,9 +100,10 @@ type InferenceState
         src.ssavaluetypes = Any[ NF for i = 1:(src.ssavaluetypes::Int) ]
 
         n = length(code)
-        s = Any[ () for i = 1:n ]
+        s_types = Any[ () for i = 1:n ]
         # initial types
-        s[1] = Any[ VarState(Bottom, true) for i = 1:nslots ]
+        s_types[1] = Any[ VarState(Bottom, true) for i = 1:nslots ]
+        s_edges = Any[ () for i = 1:n ]
 
         atypes = linfo.specTypes
         nargs = toplevel ? 0 : linfo.def.nargs
@@ -112,9 +114,9 @@ type InferenceState
                     if la > 1
                         atypes = Tuple{Any[Any for i=1:la-1]..., Tuple.parameters[1]}
                     end
-                    s[1][la] = VarState(Tuple,false)
+                    s_types[1][la] = VarState(Tuple,false)
                 else
-                    s[1][la] = VarState(tuple_tfunc(limit_tuple_depth(tupletype_tail(atypes,la))),false)
+                    s_types[1][la] = VarState(tuple_tfunc(limit_tuple_depth(tupletype_tail(atypes,la))),false)
                 end
                 la -= 1
             end
@@ -138,10 +140,10 @@ type InferenceState
                 if isa(atyp, TypeVar)
                     atyp = atyp.ub
                 end
-                s[1][i] = VarState(atyp, false)
+                s_types[1][i] = VarState(atyp, false)
             end
             for i=laty+1:la
-                s[1][i] = VarState(lastatype, false)
+                s_types[1][i] = VarState(lastatype, false)
             end
         else
             @assert la == 0 # wrong number of arguments
@@ -175,7 +177,7 @@ type InferenceState
         frame = new(
             sp, nl, inmodule, 0,
             linfo, src, world, min_valid, max_valid,
-            nargs, s, Union{}, W, n,
+            nargs, s_types, s_edges, Union{}, W, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), # Dict{InferenceState, Vector{LineNum}}(),
@@ -1550,22 +1552,43 @@ function update_valid_age!(li::MethodInstance, sv::InferenceState)
     sv.max_valid = min(sv.max_valid, max_age(li))
     nothing
 end
-function add_backedge(li::MethodInstance, sv::InferenceState)
-    caller = sv.linfo
-    isdefined(caller, :def) || return # don't add backedges to toplevel exprs
-    ccall(:jl_method_instance_add_backedge, Void, (Any, Any), li, caller)
-    update_valid_age!(li, sv)
+function add_backedge(li::MethodInstance, caller::InferenceState)
+    isdefined(caller.linfo, :def) || return # don't add backedges to toplevel exprs
+    if caller.stmt_edges[caller.currpc] === ()
+        caller.stmt_edges[caller.currpc] = []
+    end
+    push!(caller.stmt_edges[caller.currpc], li)
+    update_valid_age!(li, caller)
     nothing
 end
-function add_mt_backedge(mt::MethodTable, typ::ANY, sv::InferenceState)
-    caller = sv.linfo
-    isdefined(caller, :def) || return # don't add backedges to toplevel exprs
-    ccall(:jl_method_table_add_backedge, Void, (Any, Any, Any), mt, typ, caller)
-    # TODO: did this affect the valid ages for sv?
+function add_mt_backedge(mt::MethodTable, typ::ANY, caller::InferenceState)
+    isdefined(caller.linfo, :def) || return # don't add backedges to toplevel exprs
+    if caller.stmt_edges[caller.currpc] === ()
+        caller.stmt_edges[caller.currpc] = []
+    end
+    push!(caller.stmt_edges[caller.currpc], mt)
+    push!(caller.stmt_edges[caller.currpc], typ)
+    # TODO: how to compute the affect this has on valid ages for caller?
     nothing
 end
-# TODO: don't add backedges until caching (they are currently pointing to the wrong linfo)
-# TODO: track backedges list per-statement (so looping is more correct)
+function finalize_backedges(frame::InferenceState)
+    caller = frame.linfo
+    for edges in frame.stmt_edges
+        i = 1
+        while i < length(edges)
+            to = edges[i]
+            if isa(to, MethodInstance)
+                ccall(:jl_method_instance_add_backedge, Void, (Any, Any), to, caller)
+                i += 1
+            else
+                typeassert(to, MethodTable)
+                typ = edges[i + 1]
+                ccall(:jl_method_table_add_backedge, Void, (Any, Any, Any), to, typ, caller)
+                i += 2
+            end
+        end
+    end
+end
 
 function code_for_method(method::Method, atypes::ANY, sparams::SimpleVector, world::UInt, preexisting::Bool=false)
     if world < min_age(method) || world > max_age(method)
@@ -1647,13 +1670,13 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller
     code = code_for_method(method, atypes, sparams, caller.world)
     code === nothing && return Any
     code = code::MethodInstance
+    add_backedge(code, caller)
     if isdefined(code, :inferred)
         # return rettype if the code is already inferred
         # staged functions make this hard since they have two "inferred" conditions,
         # so need to check whether the code itself is also inferred
         inf = code.inferred
         if !isa(inf, CodeInfo) || (inf::CodeInfo).inferred
-            add_backedge(code, caller)
             return code.rettype
         end
     end
@@ -1834,6 +1857,7 @@ function typeinf_frame(frame)
             delete!(W, pc)
             frame.currpc = pc
             frame.cur_hand = frame.handler_at[pc]
+            frame.stmt_edges[pc] === () || empty!(frame.stmt_edges[pc])
             stmt = frame.src.code[pc]
             changes = abstract_interpret(stmt, s[pc]::Array{Any,1}, frame)
             if changes === ()
@@ -2135,6 +2159,9 @@ function finish(me::InferenceState)
                 me.linfo.inInference = false
                 me.linfo = cache
             end
+            if max_valid == typemax(UInt)
+                finalize_backedges(me) # add the real backedges now
+            end
         end
     end
 
@@ -2151,7 +2178,6 @@ function finish(me::InferenceState)
             i.inworkq || push!(workq, i)
             i.inworkq = true
         end
-        add_backedge(me.linfo, i) # add the real backedge now
     end
 
     # finalize and record the linfo result
