@@ -40,8 +40,8 @@ if !isdefined(Main, :Base)
 end
 
 # core array operations
-include("abstractarray.jl")
 include("array.jl")
+include("abstractarray.jl")
 
 #TODO: eliminate Dict from inference
 include("hashing.jl")
