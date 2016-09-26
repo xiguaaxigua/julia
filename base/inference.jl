@@ -34,10 +34,18 @@ typealias VarTable Array{Any,1}
 type VarState
     typ
     undef::Bool
+    function VarState(typ::ANY, undef::Bool)
+        if isa(typ, DataType) && isdefined(typ, :instance)
+            # replace singleton types with their equivalent Const object
+            typ = Const(typ.instance)
+        end
+        return new(typ, undef)
+    end
 end
 
 immutable Const
     val
+    Const(v::ANY) = new(v)
 end
 
 type InferenceState
