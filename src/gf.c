@@ -342,18 +342,23 @@ JL_DLLEXPORT jl_method_instance_t* jl_set_lambda_inferred(
                 // there are 6(!) regions here to consider + boundary conditions for each
                 if (li->max_world >= min_world && li->min_world <= max_world) {
                     // there is a non-zero overlap between [li->min, li->max] and [min, max]
-                    // there are now 3 regions left to consider
+                    // there are now 4 regions left to consider
                     // TODO: also take into account li->def->world range when computing preferred division
-                    if (li->min_world <= max_world && li->max_world > max_world) {
+                    if (li->max_world > max_world) {
                         // prefer making it applicable to future ages,
                         // as those are more likely to be useful
-                        // this covers 2 of the remaining regions
                         li->min_world = max_world + 1;
                         truncate_world_range(li, set_min_world);
                     }
-                    else if (li->max_world >= min_world && li->min_world < min_world) {
+                    else if (li->min_world < min_world) {
                         assert(min_world > 1 && "logic violation: min(li->min_world) == 1 (by construction), so min(min_world) == 2");
                         li->max_world = min_world - 1;
+                        truncate_world_range(li, set_max_world);
+                    }
+                    else {
+                        // old inferred li is fully covered by new inference result, so just delete it
+                        assert(!uninferred);
+                        li->max_world = li->min_world - 1;
                         truncate_world_range(li, set_max_world);
                     }
                 }
