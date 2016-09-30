@@ -556,7 +556,7 @@ static Value *make_jlcall(ArrayRef<const jl_cgval_t*> args, jl_codectx_t *ctx);
 static Value *global_binding_pointer(jl_module_t *m, jl_sym_t *s,
                                      jl_binding_t **pbnd, bool assign, jl_codectx_t *ctx);
 static jl_cgval_t emit_checked_var(Value *bp, jl_sym_t *name, jl_codectx_t *ctx, bool isvol, MDNode *tbaa);
-static Value *emit_condition(jl_value_t *cond, const std::string &msg, jl_codectx_t *ctx);
+static Value *emit_condition(const jl_cgval_t &condV, const std::string &msg, jl_codectx_t *ctx);
 static void allocate_gc_frame(BasicBlock *b0, jl_codectx_t *ctx);
 static GlobalVariable *prepare_global(GlobalVariable *G, Module *M = jl_builderModule);
 static Value *prepare_call(Value *Callee);
@@ -2134,9 +2134,10 @@ static Value *emit_bits_compare(const jl_cgval_t &arg1, const jl_cgval_t &arg2, 
     Type *at = julia_type_to_llvm(arg1.typ);
 
     if (at->isIntegerTy() || at->isPointerTy() || at->isFloatingPointTy()) {
-        Value *varg1 = emit_unbox(at, arg1, arg1.typ);
-        Value *varg2 = emit_unbox(at, arg2, arg2.typ);
-        return builder.CreateICmpEQ(JL_INT(varg1),JL_INT(varg2));
+        Type *at_int = INTT(at);
+        Value *varg1 = emit_unbox(at_int, arg1, arg1.typ);
+        Value *varg2 = emit_unbox(at_int, arg2, arg2.typ);
+        return builder.CreateICmpEQ(varg1, varg2);
     }
 
     if (at->isVectorTy()) {
@@ -2145,11 +2146,11 @@ static Value *emit_bits_compare(const jl_cgval_t &arg1, const jl_cgval_t &arg2, 
         Value *varg1 = emit_unbox(at, arg1, arg1.typ);
         Value *varg2 = emit_unbox(at, arg2, arg2.typ);
         size_t l = jl_svec_len(types);
-        for(unsigned i=0; i < l; i++) {
-            jl_value_t *fldty = jl_svecref(types,i);
+        for (unsigned i = 0; i < l; i++) {
+            jl_value_t *fldty = jl_svecref(types, i);
             Value *subAns, *fld1, *fld2;
-            fld1 = builder.CreateExtractElement(varg1, ConstantInt::get(T_int32,i)),
-            fld2 = builder.CreateExtractElement(varg2, ConstantInt::get(T_int32,i)),
+            fld1 = builder.CreateExtractElement(varg1, ConstantInt::get(T_int32, i)),
+            fld2 = builder.CreateExtractElement(varg2, ConstantInt::get(T_int32, i)),
             subAns = emit_bits_compare(mark_julia_type(fld1, false, fldty, ctx), mark_julia_type(fld2, false, fldty, ctx), ctx);
             answer = builder.CreateAnd(answer, subAns);
         }
@@ -2196,7 +2197,7 @@ static Value *emit_bits_compare(const jl_cgval_t &arg1, const jl_cgval_t &arg2, 
         }
     }
     assert(0 && "what is this llvm type?");
-    return 0;
+    abort();
 }
 
 // emit code for is (===).
