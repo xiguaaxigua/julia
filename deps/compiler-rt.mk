@@ -35,11 +35,15 @@ CRT_OS   := $(call lower,$(OS))
 CRT_ARCH := $(call patsubst,i%86,i386,$(ARCH))
 CRT_STATIC_NAME := clang_rt.builtins-$(CRT_ARCH)
 
-$(info $(CRT_OS))
-$(info $(CRT_ARCH))
-
 # We can only rely on compiler-rt being build alongside LLVM with CMAKE
 ifeq ($(LLVM_USE_CMAKE),0)
+override STANDALONE_COMPILER_RT := 1
+endif
+
+# Much to my chagrin LLVM 3.9 currently fails over if we try to build
+# compiler-rt without clang. We will need to patch the build system
+# but in the meantime we will fall back onto the standalone build.
+ifeq ($(BUILD_LLVM_CLANG),0)
 override STANDALONE_COMPILER_RT := 1
 endif
 
