@@ -59,64 +59,6 @@ $(CRT_DIR)/lib$(CRT_STATIC_NAME): | $(LLVM_BUILDDIR_withtype)/build-compiled
 else
 $(error Compiler-rt is not available, please set STANDALONE_COMPILER_RT:=1)
 endif
-# Use compiler-rt from the clang installation
-$(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE): $(CRT_DIR)/lib$(CRT_STATIC_NAME) | $(COMPILER_RT_BUILDDIR)/build-configured
-	$(CC) $(LDFLAGS) -shared $(fPIC) -o $@ -nostdlib $(WHOLE_ARCHIVE) -L$(dir $<) -l$(notdir $<) $(WHOLE_NOARCHIVE)
-endif
-
-ifneq ($(STANDALONE_COMPILER_RT),0)
-# The standalone compiler-rt build is inspired by
-# https://github.com/ReservedField/arm-compiler-rt
-CRT_SRCDIR := $(COMPILER_RT_SRCDIR)/lib/builtins
-CRT_ARCH_SRCDIR := $(CRT_SRCDIR)/$(CRT_ARCH)
-CRT_INCLUDES := -I$(CRT_SRCDIR) -I$(CRT_ARCH_SRCDIR)
-CRT_CFLAGS := $(CPPFLAGS) $(CFLAGS) -O2 \
-		-std=gnu99 $(fPIC) -fno-builtin -fvisibility=hidden \
-		-ffreestanding $(CRT_INCLUDES)
-ifeq ($(USE_CLANG),1)
-CRT_CFLAGS += -Wno-unknown-attributes -Wno-macro-redefined
-endif
-
-##
-# Blacklist a few files we don't want to deal with
-##
-CRT_BLACKLIST := atomic.c atomic_flag_clear.c atomic_flag_clear_explicit.c \
-	atomic_flag_test_and_set.c atomic_flag_test_and_set_explicit.c \
-	atomic_signal_fence.c atomic_thread_fence.c
-
-# TODO(vchuravy) discover architecture flags
-# Discover all files...
-CRT_CFILES := $(wildcard $(CRT_SRCDIR)/*.c)
-CRT_GENERAL_OBJS1 := $(filter-out $(CRT_BLACKLIST:.c=.o), $(notdir $(CRT_CFILES:.c=.o)))
-
-CRT_ARCH_CFILES := $(wildcard $(CRT_ARCH_SRCDIR)/*.c)
-CRT_ARCH_SFILES := $(wildcard $(CRT_ARCH_SRCDIR)/*.S)
-CRT_ARCH_OBJS   := $(notdir $(join $(CRT_ARCH_CFILES:.c=.o),$(CRT_ARCH_SFILES:.S=.o)))
-
-CRT_GENERAL_OBJS := $(filter-out $(CRT_ARCH_OBJS), $(CRT_GENERAL_OBJS1))
-
-CRT_OBJS := $(addprefix $(COMPILER_RT_BUILDDIR)/,$(CRT_GENERAL_OBJS)) \
-	$(addprefix $(COMPILER_RT_BUILDDIR)/$(CRT_ARCH)/,$(CRT_ARCH_OBJS))
-
-CRT_BUILDDIR := $(COMPILER_RT_BUILDDIR)
-$(CRT_BUILDDIR)/$(CRT_ARCH): | $(CRT_BUILDDIR)/build-configured
-	mkdir -p $@
-
-$(CRT_BUILDDIR)/%.o: $(CRT_SRCDIR)/%.c | $(CRT_BUILDDIR)/build-configured
-	$(CC) $(CRT_CFLAGS) -c $< -o $@
-
-$(CRT_BUILDDIR)/%.o: $(CRT_SRCDIR)/%.S | $(CRT_BUILDDIR)/build-configured
-	$(CC) $(CRT_CFLAGS) -c $< -o $@
-
-$(CRT_BUILDDIR)/$(CRT_ARCH)/%.o: $(CRT_ARCH_SRCDIR)/%.c | $(CRT_BUILDDIR)/$(CRT_ARCH)
-	$(CC) $(CRT_CFLAGS) -c $< -o $@
-
-$(CRT_BUILDDIR)/$(CRT_ARCH)/%.o: $(CRT_ARCH_SRCDIR)/%.S | $(CRT_BUILDDIR)/$(CRT_ARCH)
-	$(CC) $(CRT_CFLAGS) -c $< -o $@
-
-$(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE): $(CRT_OBJS) | $(COMPILER_RT_SRCDIR)/source-extracted $(CRT_BUILDDIR)/build-configured
-	$(CC) $(LDFLAGS) -shared -o $@ $^
-
 endif
 
 $(COMPILER_RT_SRCDIR)/source-extracted: | $(COMPILER_RT_TAR)
@@ -127,9 +69,31 @@ ifneq ($(COMPILER_RT_TAR),)
 endif
 	echo 1 > $@
 
-$(COMPILER_RT_BUILDDIR)/build-configured:
-	mkdir -p $(dir $@)
+$(COMPILER_RT_BUILDDIR):
+	mkdir -p $@
+$(COMPILER_RT_BUILDDIR)/$(CRT_ARCH):
+	mkdir -p $@
+
+ifeq ($(STANDALONE_COMPILER_RT),1)
+$(COMPILER_RT_BUILDDIR)/Makefile: compiler-rt_standalone.mk | $(COMPILER_RT_BUILDDIR)
+	cp $< $@
+$(COMPILER_RT_BUILDDIR)/build-configured: $(COMPILER_RT_BUILDDIR)/Makefile | $(COMPILER_RT_BUILDDIR)/$(CRT_ARCH)
 	echo 1 > $@
+$(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE): | $(COMPILER_RT_SRCDIR)/source-extracted $(COMPILER_RT_BUILDDIR)/build-configured
+	$(MAKE) -C $(COMPILER_RT_BUILDDIR) \
+		LIBFILE=$(COMPILER_RT_LIBFILE) \
+		CRT_SRCDIR=$(COMPILER_RT_SRCDIR) \
+		OS=$(CRT_OS) \
+		ARCH=$(CRT_ARCH) \
+		USE_CLANG=$(USE_CLANG) \
+		fPIC=$(fPIC)
+else
+$(COMPILER_RT_BUILDDIR)/build-configured: $(COMPILER_RT_BUILDDIR)
+	echo 1 > $@
+# Use compiler-rt from the clang installation
+$(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE): $(CRT_DIR)/lib$(CRT_STATIC_NAME) | $(COMPILER_RT_BUILDDIR)/build-configured
+	$(CC) $(LDFLAGS) -shared $(fPIC) -o $@ -nostdlib $(WHOLE_ARCHIVE) -L$(dir $<) -l$(notdir $<) $(WHOLE_NOARCHIVE)
+endif
 
 get-compiler-rt: $(COMPILER_RT_TAR)
 ifeq ($(STANDALONE_COMPILER_RT), 0)
