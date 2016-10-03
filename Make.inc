@@ -228,8 +228,11 @@ LLVM_DEBUG := 0
 #LLVM_USE_CMAKE: defined in deps/llvm-ver.mk as it depends on LLVM_VER_SHORT
 # set to 1 to get clang and compiler-rt
 BUILD_LLVM_CLANG := 0
-# set to 1 to build compiler-rt standalone.
-STANDALONE_COMPILER_RT := 0
+# set to 0 to disable building compiler-rt standalone.
+# Currently compiler-rt can only be build alongside clang
+# so we default to the standalone build
+STANDALONE_COMPILER_RT := 1
+
 # set to 1 to get lldb (often does not work, no chance with llvm3.2 and earlier)
 # see http://lldb.llvm.org/build.html for dependencies
 BUILD_LLDB := 0
