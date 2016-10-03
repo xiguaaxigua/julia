@@ -15,7 +15,7 @@ SRCDIR := $(CRT_SRCDIR)/lib/builtins
 ARCH_SRCDIR := $(SRCDIR)/$(ARCH)
 INCLUDES := -I$(SRCDIR) -I$(ARCH_SRCDIR)
 CRT_CFLAGS := $(CPPFLAGS) $(CFLAGS) -O2 \
-		-std=gnu99 $(fPIC) -fno-builtin -fvisibility=hidden \
+		-std=gnu99 $(fPIC) -fno-builtin \
 		-ffreestanding $(INCLUDES)
 ifeq ($(USE_CLANG),1)
 CRT_CFLAGS += -Wno-unknown-attributes -Wno-macro-redefined
