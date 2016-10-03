@@ -83,6 +83,13 @@ $(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE): $(CRT_DIR)/lib$(CRT_STATIC_NAME)
 	$(CC) $(LDFLAGS) -shared $(fPIC) -o $@ -nostdlib $(WHOLE_ARCHIVE) -L$(dir $<) -l$(notdir $<) $(WHOLE_NOARCHIVE)
 endif
 
+ifneq ($(COMPILER_RT_TAR),)
+ifeq ($(LLVM_COMPILER_RT_TAR),)
+$(COMPILER_RT_TAR): | $(SRCDIR)/srccache
+	$(JLDOWNLOAD) $@ $(LLVM_SRC_URL)/$(notdir $@)
+endif
+endif
+
 get-compiler-rt: $(COMPILER_RT_TAR)
 ifeq ($(STANDALONE_COMPILER_RT), 0)
 extract-compiler-rt: #NONE
