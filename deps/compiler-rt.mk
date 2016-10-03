@@ -32,7 +32,11 @@ COMPILER_RT_LIBFILE := libcompiler-rt.$(SHLIB_EXT)
 # TODO(vchuravy): ARM, PPC, mac, windows
 ##
 CRT_OS   := $(call lower,$(OS))
+ifneq (,$(filter $(ARCH), powerpc64le ppc64le))
+CRT_ARCH := ppc
+else
 CRT_ARCH := $(call patsubst,i%86,i386,$(ARCH))
+endif
 CRT_STATIC_NAME := clang_rt.builtins-$(CRT_ARCH)
 
 ifeq ($(STANDALONE_COMPILER_RT),1)
