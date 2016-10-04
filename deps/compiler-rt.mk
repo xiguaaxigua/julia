@@ -101,7 +101,8 @@ else
 extract-compiler-rt: $(COMPILER_RT_SRCDIR)/source-extracted
 endif
 
-$(build_private_libdir)/$(COMPILER_RT_LIBFILE): $(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE) | $(build_private_libdir)
+$(build_private_libdir)/$(COMPILER_RT_LIBFILE): $(COMPILER_RT_BUILDDIR)/$(COMPILER_RT_LIBFILE)
+	mkdir -p $(dir $@)
 	cp $< $@
 
 $(build_prefix)/manifest/compiler-rt: | $(build_prefix)/manifest
