@@ -229,7 +229,7 @@ LLVM_DEBUG := 0
 # set to 1 to get clang and compiler-rt
 BUILD_LLVM_CLANG := 0
 # set to 0 to disable building compiler-rt standalone.
-# Currently compiler-rt can only be build alongside clang
+# Currently compiler-rt can only be built alongside clang
 # so we default to the standalone build
 STANDALONE_COMPILER_RT := 1
 
