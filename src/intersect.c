@@ -2,55 +2,50 @@ static jl_value_t *intersect_union(jl_value_t *x, jl_uniontype_t *u, jl_stenv_t 
 {
     jl_value_t *a=NULL, *b=NULL;
     JL_GC_PUSH2(&a, &b);
-    a = R ? intersect(x, u->a) : intersect(u->a, x);
-    b = R ? intersect(x, u->b) : intersect(u->b, x);
+    int ftv = jl_has_free_typevars(x);
+    if (ftv || jl_has_free_typevars(u->a)) {
+        // if stack overflow, push a `1`, else look up my bit
+        // if my bit == 0, a = jl_bottom_type
+    }
+    if (ftv || jl_has_free_typevars(u->b)) {
+        // if stack overflow, push a `1`, else look up my bit
+        // if my bit == 0, b = jl_bottom_type
+    }
+
+    if (a == NULL)
+        a = R ? intersect(x, u->a) : intersect(u->a, x);
+    if (b == NULL)
+        b = R ? intersect(x, u->b) : intersect(u->b, x);
     jl_value_t *I = simple_join(a, b);
     JL_GC_POP();
     return I;
 }
 
-static int intersect_ufirst(jl_value_t *x, jl_value_t *y, jl_stenv_t *e)
+static jl_value_t *intersect_ufirst(jl_value_t *x, jl_value_t *y, jl_stenv_t *e)
 {
     if (jl_is_uniontype(x) && jl_is_typevar(y))
         return intersect_union(y, (jl_uniontype_t*)x, e, 0, &e->Lunions, 0);
     if (jl_is_typevar(x) && jl_is_uniontype(y))
         return intersect_union(x, (jl_uniontype_t*)y, e, 1, &e->Runions, 0));
-    return subtype(x, y, e, 0);
+    return intersect(x, y, e, 0);
 }
 
-static int var_lt(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int param)
+static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int param)
 {
     jl_varbinding_t *bb = lookup(e, b);
     if (bb == NULL)
-        return subtype_ufirst(b->ub, a, e);
+        return intersect_ufirst(b->ub, a, e);
     record_var_occurrence(bb, e, param);
-    if (!bb->right)  // check ∀b . b<:a
-        return subtype_ufirst(bb->ub, a, e);
-    if (!((bb->lb == jl_bottom_type && !jl_is_type(a) && !jl_is_typevar(a)) || subtype_ufirst(bb->lb, a, e)))
-        return 0;
-    // for contravariance we would need to compute a meet here, but
-    // because of invariance bb.ub ⊓ a == a here always. however for this
-    // to work we need to compute issub(left,right) before issub(right,left),
-    // since otherwise the issub(a, bb.ub) check in var_gt becomes vacuous.
-    bb->ub = a;  // meet(bb->ub, a)
-    return 1;
+    if (!jl_is_type(a) && !jl_is_typevar(a) && bb->lb != jl_bottom_type)
+        return jl_bottom_type;
+    jl_value_t *ub = intersect_ufirst(bb->ub, a, e);
+    bb->ub = ub;
+    if (!subtype_ufirst(bb->lb, ub, e))
+        return jl_bottom_type;
+    return (jl_value_t*)b;
 }
 
-static int var_gt(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int param)
-{
-    jl_varbinding_t *bb = lookup(e, b);
-    if (bb == NULL)
-        return subtype_ufirst(a, b->lb, e);
-    record_var_occurrence(bb, e, param);
-    if (!bb->right)  // check ∀b . b>:a
-        return subtype_ufirst(a, bb->lb, e);
-    if (!((bb->ub == (jl_value_t*)jl_any_type && !jl_is_type(a) && !jl_is_typevar(a)) || subtype_ufirst(a, bb->ub, e)))
-        return 0;
-    bb->lb = simple_join(bb->lb, a);
-    return 1;
-}
-
-static int subtype_unionall(jl_value_t *t, jl_unionall_t *u, jl_stenv_t *e, int8_t R, int param)
+static jl_value_t *intersect_unionall(jl_value_t *t, jl_unionall_t *u, jl_stenv_t *e, int8_t R, int param)
 {
     jl_varbinding_t *btemp = e->vars;
     // if the var for this unionall (based on identity) already appears somewhere
